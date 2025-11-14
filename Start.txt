@@ -1,0 +1,66 @@
+A) Build & start all services (db, backend, recommender, airflow, frontend)
+
+PowerShell (from repo root):
+
+docker compose -f .\infra\docker-compose.yaml up -d --build
+
+B) Build & start the core four (db, backend, recommender, airflow)
+docker compose -f .\infra\docker-compose.yaml up -d --build db backend recommender airflow
+
+
+(If you also want the frontend placeholder, add frontend at the end.)
+
+Quick health checks (copy/paste)
+
+See what’s running
+
+docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+
+
+Backend
+
+Invoke-RestMethod http://localhost:8000/health
+
+
+Recommender
+
+Invoke-RestMethod http://localhost:8001/health
+
+
+Airflow UI
+Open: http://localhost:8080
+
+Login: admin / admin
+
+DB ping (inside backend container)
+
+docker exec moviemix-backend node -e "fetch('http://recommender:8001/health').then(r=>r.json()).then(console.log).catch(console.error)"
+
+Tail logs if something looks off
+docker compose -f .\infra\docker-compose.yaml logs -f --tail=100 db
+docker compose -f .\infra\docker-compose.yaml logs -f --tail=100 backend
+docker compose -f .\infra\docker-compose.yaml logs -f --tail=100 recommender
+docker compose -f .\infra\docker-compose.yaml logs -f --tail=100 airflow
+
+Common gotchas
+
+Ports already in use → stop old processes or change ports in infra/docker-compose.yaml.
+
+DB schema didn’t re-init → you likely have a persisted volume (expected). If you truly need a clean DB:
+
+docker compose -f .\infra\docker-compose.yaml down
+docker volume rm moviemix_pgdata   # ⚠️ deletes DB data
+docker compose -f .\infra\docker-compose.yaml up -d --build db
+
+
+Recommender says “Index not built” → rebuild once:
+
+Invoke-RestMethod http://localhost:8001/admin/build_embeddings -Method Post -ContentType "application/json" -Body '{"limit":200}'
+
+
+Want me to run through quick verifications for your current state (what each endpoint should return)?
+
+
+Since my docker-compose is in infra I should run by passing the env first 
+docker compose --env-file .env -f .\infra\docker-compose.yaml up -d --build
+Like this 

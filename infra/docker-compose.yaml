@@ -1,0 +1,76 @@
+# MOVIEMIX-SCAFFOLD: compose v0
+
+services:
+  db:
+    image: postgres:16
+    container_name: moviemix-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: I4mGr00t
+      POSTGRES_DB: moviemix
+    ports: ["5432:5432"]
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+      - ../db/init:/docker-entrypoint-initdb.d:ro
+
+  backend:
+    build: ../backend
+    container_name: moviemix-backend
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      RECS_URL: "http://recommender:8001"
+      OMDB_API_KEY: "${OMDB_API_KEY}"
+      TRAKT_CLIENT_ID: "${TRAKT_CLIENT_ID}"
+      TRAKT_CLIENT_SECRET: "${TRAKT_CLIENT_SECRET}"
+      TRAKT_REDIRECT_URI: "${TRAKT_REDIRECT_URI}"
+    ports: ["8000:8000"]
+    depends_on: [db, recommender]
+
+
+  recommender:
+    build: ../recommender
+    container_name: moviemix-recommender
+    restart: unless-stopped
+    env_file: ../.env
+    ports: ["8001:8001"]
+    # optional but handy to persist FAISS/index files:
+    volumes:
+      - ../recommender/data:/app/data
+      - ../vector_data:/app/vector
+
+  frontend:
+    build: ../frontend
+    container_name: moviemix-frontend
+    restart: unless-stopped
+    environment:
+      - BACKEND_ORIGIN=http://backend:8000   # used by next.config.js rewrites
+      - NEXT_TELEMETRY_DISABLED=1
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    
+
+  airflow:
+    image: apache/airflow:2.10.2
+    container_name: moviemix-airflow
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__WEBSERVER__BASE_URL: "http://localhost:8080"
+      AIRFLOW_UID: "50000"
+      AIRFLOW_CONN_MOVIEMIX_PG: "postgresql://admin:I4mGr00t@db:5432/moviemix"
+    user: "50000:0"
+    volumes:
+      - ../airflow/dags:/opt/airflow/dags
+      - ../airflow/plugins:/opt/airflow/plugins
+      - airflowdata:/opt/airflow
+    ports: ["8080:8080"]
+    command: ["bash","-lc","airflow db init && airflow users create --username admin --password admin --firstname A --lastname K --role Admin --email admin@example.com && airflow webserver & airflow scheduler"]
+
+volumes:
+  dbdata: {}
+  airflowdata: {}
