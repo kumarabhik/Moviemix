@@ -494,12 +494,3 @@ MovieMix demonstrates:
 
 ✅ A production-style UI/UX with auth, wishlist, and recommendation lanes.
 
-Perfect for:
-
-Hackathons
-
-Final-year projects
-
-ML / Data / Backend engineering interviews
-
-Portfolio / GitHub showcase
