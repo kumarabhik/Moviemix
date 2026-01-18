@@ -4,54 +4,109 @@ import cors from "cors";
 import "dotenv/config";
 import pkg from "pg";
 import fetch from "node-fetch";
-import recsRouter from './routes/recs.js';   // 👈 update path
+
+import recsRouter from "./routes/recs.js";
 import wishlistRouter from "./routes/wishlist.js";
 import titleRouter from "./routes/title.js";
 import authRoutes from "./routes/auth.js";
-import interactionsRoutes from "./routes/events.js";
-// app.use('/api/recs', recsRouter);
+import interactionsRoutes from "./routes/interactions.js";
+import eventsRouter from "./routes/events.js";
+import integrationsRouter from "./routes/integrations.js";
+
+import client from "prom-client";
+// new mount
 
 const { Pool } = pkg;
 
 const PORT = process.env.PORT || 8000;
 const DATABASE_URL = process.env.DATABASE_URL;
-const RECS_URL = process.env.RECS_URL || "http://recommender:8001"; // <-- matches compose
+const RECS_URL = process.env.RECS_URL || "http://recommender:8001";
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-app.use("/api/wishlist", wishlistRouter);
-
-app.use("/api/title", titleRouter);
-app.use("/api/auth", authRoutes);
-app.set('etag', false); 
-// disable ETag generation globally
-app.use("/api/interactions", interactionsRoutes);
-
+/* =========================
+   Disable caching
+========================= */
+app.set("etag", false);
 app.use((req, res, next) => {
-  res.set('Cache-Control', 'no-store');
-  res.set('Pragma', 'no-cache');
-  res.set('Expires', '0');
+  res.set("Cache-Control", "no-store");
+  res.set("Pragma", "no-cache");
+  res.set("Expires", "0");
   next();
 });
 
-// Global error handler (to print stack traces)
-app.use((err, req, res, next) => {
-  console.error("🔥 Global Error Handler:", err.stack || err);
-  res.status(500).json({ ok: false, error: err.message || "Internal Server Error" });
-});
-
+/* =========================
+   Logger
+========================= */
 app.use((req, res, next) => {
   console.log(`[${req.method}] ${req.url}`);
   next();
 });
 
-app.use('/api/recs', recsRouter);
+/* =========================
+   ---- Prometheus metrics ----
+========================= */
+client.collectDefaultMetrics();
 
-// Postgres pool (optional if DATABASE_URL present)
-const pool = DATABASE_URL ? new Pool({ connectionString: DATABASE_URL }) : null;
+const httpRequestsTotal = new client.Counter({
+  name: "http_requests_total",
+  help: "Total HTTP requests",
+  labelNames: ["method", "route", "status"],
+});
 
+const httpRequestDurationMs = new client.Histogram({
+  name: "http_request_duration_ms",
+  help: "HTTP request duration in ms",
+  labelNames: ["method", "route", "status"],
+  buckets: [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+});
+
+// capture metrics for all requests
+app.use((req, res, next) => {
+  const start = Date.now();
+
+  res.on("finish", () => {
+    const route = req.route?.path || req.baseUrl || req.path || "unknown";
+    const status = String(res.statusCode);
+
+    httpRequestsTotal.labels(req.method, route, status).inc();
+    httpRequestDurationMs
+      .labels(req.method, route, status)
+      .observe(Date.now() - start);
+  });
+
+  next();
+});
+
+// expose metrics endpoint
+app.get("/metrics", async (_req, res) => {
+  res.set("Content-Type", client.register.contentType);
+  res.end(await client.register.metrics());
+});
+
+/* =========================
+   Routes
+========================= */
+app.use("/api/wishlist", wishlistRouter);
+app.use("/api/title", titleRouter);
+app.use("/api/auth", authRoutes);
+app.use("/api/interactions", interactionsRoutes);
+app.use("/api/events", eventsRouter);
+app.use("/api/recs", recsRouter);
+app.use("/api/integrations", integrationsRouter);
+
+/* =========================
+   Postgres pool
+========================= */
+const pool = DATABASE_URL
+  ? new Pool({ connectionString: DATABASE_URL })
+  : null;
+
+/* =========================
+   Health checks
+========================= */
 app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "backend", ts: new Date().toISOString() });
 });
@@ -66,7 +121,9 @@ app.get("/db/health", async (_req, res) => {
   }
 });
 
-/** ---------- proxy to recommender ---------- **/
+/* =========================
+   Proxy to recommender
+========================= */
 app.post("/api/recs/content", async (req, res) => {
   try {
     const r = await fetch(`${RECS_URL}/recs/content`, {
@@ -95,7 +152,9 @@ app.post("/api/recs/semantic", async (req, res) => {
   }
 });
 
-/** ---------- tiny /titles scaffold (DB read) ---------- **/
+/* =========================
+   Titles scaffold
+========================= */
 app.get("/api/titles", async (_req, res) => {
   if (!pool) return res.status(500).json({ ok: false, error: "No DATABASE_URL" });
   try {
@@ -108,6 +167,19 @@ app.get("/api/titles", async (_req, res) => {
   }
 });
 
+/* =========================
+   Global error handler (LAST)
+========================= */
+app.use((err, req, res, next) => {
+  console.error("🔥 Global Error Handler:", err.stack || err);
+  res
+    .status(500)
+    .json({ ok: false, error: err.message || "Internal Server Error" });
+});
+
+/* =========================
+   Start server
+========================= */
 app.listen(PORT, () => {
   console.log(`Backend listening on :${PORT}`);
 });

@@ -8,7 +8,7 @@ load_dotenv()
 
 # *** IMPORTANT ***
 # Use localhost here because this script runs on your host, not inside Docker
-DATABASE_URL = "postgresql://admin:I4mGr00t@localhost:5432/moviemix"
+DATABASE_URL = "postgresql://admin:I4mGr00t@127.0.0.1:5432/moviemix"
 
 OMDB_KEY = os.getenv("OMDB_API_KEY")
 if not OMDB_KEY:

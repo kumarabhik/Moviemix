@@ -1,0 +1,18 @@
+﻿groups:
+  - name: moviemix_alerts
+    rules:
+      - alert: BackendDown
+        expr: up{job="backend"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "MovieMix backend is down"
+
+      - alert: RecommenderDown
+        expr: up{job="recommender"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "MovieMix recommender is down"

@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow
+  namespace: moviemix
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: airflow
+  template:
+    metadata:
+      labels:
+        app: airflow
+    spec:
+      containers:
+        - name: airflow
+          image: apache/airflow:2.10.2
+          command: ["bash","-lc"]
+          args:
+            - >
+              airflow db init &&
+              airflow users create
+              --username admin
+              --password admin
+              --firstname A
+              --lastname K
+              --role Admin
+              --email admin@example.com &&
+              airflow webserver & airflow scheduler
+          env:
+            - name: AIRFLOW__CORE__LOAD_EXAMPLES
+              value: "False"
+            - name: AIRFLOW__WEBSERVER__BASE_URL
+              value: "http://localhost:8080"
+            - name: AIRFLOW_UID
+              value: "50000"
+            - name: AIRFLOW_CONN_MOVIEMIX_PG
+              value: postgresql://admin:I4mGr00t@db:5432/moviemix
+          ports:
+            - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: airflow
+  namespace: moviemix
+spec:
+  selector:
+    app: airflow
+  ports:
+    - port: 8080

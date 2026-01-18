@@ -20,6 +20,18 @@ function authHeaders() {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+export async function importFromTrakt() {
+  const r = await fetch("/api/integrations/trakt/import", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    cache: "no-store",
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data?.error || `import failed: ${r.status}`);
+  return data;
+}
+
+
 // ---- Recs / search ----
 export async function getSimilarBySeedText(seedText, topK = 5) {
   const params = new URLSearchParams({
@@ -100,3 +112,21 @@ export async function getTitleById(id) {
   if (!res.ok) throw new Error("title fetch failed");
   return res.json();
 }
+
+export async function getWatchLinks(id) {
+  const base = process.env.NEXT_PUBLIC_API_BASE || "";
+  const url = `${base}/api/title/${id}/watch-links?_ts=${Date.now()}`;
+
+  try {
+    const r = await fetch(url, { cache: "no-store" });
+    if (!r.ok) {
+      console.log("watch-links HTTP", r.status);
+      return null;
+    }
+    return r.json();
+  } catch (e) {
+    console.log("watch-links fetch failed", e);
+    return null;
+  }
+}
+

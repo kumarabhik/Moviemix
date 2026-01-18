@@ -1,13 +1,23 @@
 # ---------- deps ----------
 FROM node:20-alpine AS deps
 WORKDIR /app
-COPY package.json ./
-RUN npm install
+
+# Copy both manifest + lock for reproducible installs
+COPY package.json package-lock.json ./
+
+# Make npm resilient to flaky network
+RUN npm config set fetch-retries 5 \
+ && npm config set fetch-retry-mintimeout 20000 \
+ && npm config set fetch-retry-maxtimeout 120000 \
+ && npm ci --no-audit --no-fund
 
 # ---------- build ----------
 FROM node:20-alpine AS build
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
+ARG NEXT_PUBLIC_ENABLE_AB_TEST
+ENV NEXT_PUBLIC_ENABLE_AB_TEST=$NEXT_PUBLIC_ENABLE_AB_TEST
+
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build

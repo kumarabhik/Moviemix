@@ -3,3 +3,56 @@
 @tailwind utilities;
 
 html, body { height: 100%; }
+
+/* Bootstrap auth pages - dark mode support */
+html.dark .card {
+  background-color: #1f2937; /* gray-800 */
+  color: #f9fafb;            /* gray-50 */
+}
+
+html.dark .card-footer {
+  background-color: #1f2937;
+}
+
+html.dark .text-muted {
+  color: #9ca3af !important;
+}
+
+html.dark .form-control {
+  background-color: #111827;
+  color: #f9fafb;
+  border-color: #374151;
+}
+
+html.dark .form-control:focus {
+  background-color: #111827;
+  color: #f9fafb;
+}
+
+html.dark label {
+  color: #d1d5db;
+}
+
+html.dark a.text-dark {
+  color: #93c5fd !important;
+}
+
+/* Auth page background */
+:root {
+  --auth-bg: #f9fafb; /* light */
+}
+
+html.dark {
+  --auth-bg: #030712; /* near-black */
+}
+
+
+/* Full-page background for light/dark */
+body {
+  background-color: #f9fafb;            /* light */
+  transition: background-color 0.3s ease;
+}
+
+html.dark body {
+  background-color: #030712;           /* dark */
+}

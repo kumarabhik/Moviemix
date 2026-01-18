@@ -4,3 +4,18 @@ __pycache__/
 node_modules/
 .DS_Store
 .vscode/
+.env
+*.env
+.env.local
+.env.development
+.env.production
+# frontend
+frontend/.next/
+
+# outputs / logs
+Outputs/
+logs.txt
+
+# db dumps
+*.sql
+Start.txt

@@ -1,6 +1,11 @@
 // frontend/pages/_app.js
-import "../styles/globals.css";
+
+import "bootstrap/dist/css/bootstrap.min.css"; // Bootstrap global styles
+// import { useEffect } from "react";
+
 import { useEffect, useState } from "react";
+import "../styles/globals.css";                // Your Tailwind/global styles
+
 import { isLoggedIn, logout } from "../lib/session";
 import Link from "next/link";
 
@@ -53,7 +58,7 @@ function Header({ dark, setDark }) {
   );
 }
 
-export default function App({ Component, pageProps }) {
+function MyApp({ Component, pageProps }) {
   const [dark, setDark] = useState(false);
 
   // On first mount, read saved theme
@@ -75,8 +80,40 @@ export default function App({ Component, pageProps }) {
     }
   }, [dark]);
 
+  // ===== Session start logging (once per tab) =====
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    // prevent double-logging in the same tab (StrictMode, rerenders)
+    if (sessionStorage.getItem("mm_session_started") === "1") return;
+
+    const token =
+      localStorage.getItem("moviemix_token") ||
+      localStorage.getItem("token");
+
+    if (!token) return;
+
+    sessionStorage.setItem("mm_session_started", "1");
+
+    fetch("/api/interactions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        event: "session_start",
+        meta: { source: "web" },
+      }),
+    }).catch(() => {});
+  }, []);
+  // ==============================================
+
+
+
+  // 🔹 No bg-* here → background comes from body (globals.css)
   return (
-    <div className="min-h-screen bg-white text-gray-900 dark:bg-gray-900 dark:text-gray-100">
+    <div className="min-h-screen text-gray-900 dark:text-gray-100">
       <Header dark={dark} setDark={setDark} />
       <main className="max-w-4xl mx-auto p-4">
         <Component {...pageProps} />
@@ -84,3 +121,5 @@ export default function App({ Component, pageProps }) {
     </div>
   );
 }
+
+export default MyApp;

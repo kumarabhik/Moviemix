@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: db
+  namespace: moviemix
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: db
+  template:
+    metadata:
+      labels:
+        app: db
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          env:
+            - name: POSTGRES_USER
+              value: admin
+            - name: POSTGRES_PASSWORD
+              value: I4mGr00t
+            - name: POSTGRES_DB
+              value: moviemix
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: dbdata
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: dbdata
+          persistentVolumeClaim:
+            claimName: dbdata-pvc
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dbdata-pvc
+  namespace: moviemix
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: db
+  namespace: moviemix
+spec:
+  selector:
+    app: db
+  ports:
+    - port: 5432

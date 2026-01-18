@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: recommender
+  namespace: moviemix
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: recommender
+  template:
+    metadata:
+      labels:
+        app: recommender
+    spec:
+      containers:
+        - name: recommender
+          image: moviemix-recommender:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8001
+
+          volumeMounts:
+            - name: recommender-data
+              mountPath: /app/data
+
+      volumes:
+        - name: recommender-data
+          persistentVolumeClaim:
+            claimName: recommender-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: recommender
+  namespace: moviemix
+spec:
+  selector:
+    app: recommender
+  ports:
+    - port: 8001
+      targetPort: 8001

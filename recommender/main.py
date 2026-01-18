@@ -9,6 +9,8 @@ import psycopg2
 import faiss
 from sentence_transformers import SentenceTransformer
 import xgboost as xgb
+from prometheus_fastapi_instrumentator import Instrumentator
+
 
 # ---------------------------
 # Configuration
@@ -28,6 +30,8 @@ MODEL_NAME = os.getenv("EMB_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 # FastAPI App
 # ---------------------------
 app = FastAPI(title="MovieMix Recommender", version="0.2.0")
+# Prometheus /metrics for FastAPI
+Instrumentator().instrument(app).expose(app)
 
 # ---------------------------
 # Schemas

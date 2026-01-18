@@ -12,7 +12,7 @@ router.use(requireAuth);
 // GET /api/wishlist
 router.get("/", async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = String(req.user.id);
 
     const result = await pool.query(
       `
@@ -23,11 +23,12 @@ router.get("/", async (req, res) => {
         t.poster_url,
         t.plot,
         t.popularity,
+        w.source       AS source,
         w.ts           AS added_at
       FROM wishlists w
       JOIN titles t ON t.id = w.title_id
       WHERE w.user_id = $1
-        AND w.source = 'app'
+        AND w.source IN ('app', 'trakt')
       ORDER BY w.ts DESC
       `,
       [userId]
@@ -43,7 +44,7 @@ router.get("/", async (req, res) => {
 // POST /api/wishlist/:titleId
 router.post("/:titleId", async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = String(req.user.id);
     const titleId = Number(req.params.titleId);
     if (!Number.isInteger(titleId)) {
       return res.status(400).json({ ok: false, error: "bad_title_id" });
@@ -75,7 +76,7 @@ router.post("/:titleId", async (req, res) => {
 // DELETE /api/wishlist/:titleId
 router.delete("/:titleId", async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = String(req.user.id);
     const titleId = Number(req.params.titleId);
     if (!Number.isInteger(titleId)) {
       return res.status(400).json({ ok: false, error: "bad_title_id" });

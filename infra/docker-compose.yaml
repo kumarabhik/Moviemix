@@ -28,30 +28,40 @@ services:
     ports: ["8000:8000"]
     depends_on: [db, recommender]
 
-
   recommender:
     build: ../recommender
     container_name: moviemix-recommender
     restart: unless-stopped
     env_file: ../.env
     ports: ["8001:8001"]
-    # optional but handy to persist FAISS/index files:
     volumes:
       - ../recommender/data:/app/data
       - ../vector_data:/app/vector
 
   frontend:
-    build: ../frontend
+    build:
+      context: ../frontend
+      args:
+        NEXT_PUBLIC_ENABLE_AB_TEST: ${NEXT_PUBLIC_ENABLE_AB_TEST}
     container_name: moviemix-frontend
     restart: unless-stopped
+
+    # ✅ IMPORTANT: load .env for frontend container too
+    env_file: ../.env
+
     environment:
       - BACKEND_ORIGIN=http://backend:8000   # used by next.config.js rewrites
       - NEXT_TELEMETRY_DISABLED=1
+      - ENABLE_AB_TEST=${ENABLE_AB_TEST}
+      - NEXT_PUBLIC_ENABLE_AB_TEST=${NEXT_PUBLIC_ENABLE_AB_TEST}
+
+      # ✅ ensure this exists at runtime inside the container
+      - NEXT_PUBLIC_ENABLE_WATCH_LINKS=${NEXT_PUBLIC_ENABLE_WATCH_LINKS}
+      - NEXT_PUBLIC_API_BASE=${NEXT_PUBLIC_API_BASE}
     ports:
       - "3000:3000"
     depends_on:
       - backend
-    
 
   airflow:
     image: apache/airflow:2.10.2
@@ -69,7 +79,12 @@ services:
       - ../airflow/plugins:/opt/airflow/plugins
       - airflowdata:/opt/airflow
     ports: ["8080:8080"]
-    command: ["bash","-lc","airflow db init && airflow users create --username admin --password admin --firstname A --lastname K --role Admin --email admin@example.com && airflow webserver & airflow scheduler"]
+    command:
+      [
+        "bash",
+        "-lc",
+        "airflow db init && airflow users create --username admin --password admin --firstname A --lastname K --role Admin --email admin@example.com && airflow webserver & airflow scheduler"
+      ]
 
 volumes:
   dbdata: {}

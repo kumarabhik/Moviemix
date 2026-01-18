@@ -28,6 +28,25 @@ async function omdbPoster(imdbId) {
   return null;
 }
 
+//dedupe duplicates 
+function dedupeByTitleId(items) {
+  const seen = new Set();
+  const out = [];
+
+  for (const it of items || []) {
+    const id = it?.title_id ?? it?.id;
+    if (!id) continue;
+
+    if (seen.has(id)) continue; // exact duplicate movie
+    seen.add(id);
+    out.push(it);
+  }
+
+  return out;
+}
+
+
+
 // Normalize recommender response into an array
 function toArray(res) {
   if (!res) return [];
@@ -172,37 +191,48 @@ async function pickSeedsForUser(userId) {
   if (wl.length > 0) return wl.map((r) => r.title_id);
 
   // Option B: fallback to most popular titles
-  const { rows: popular } = await pool.query(
-    "SELECT title_id FROM public.popular_titles ORDER BY cnt DESC LIMIT 3"
-  );
-  return popular.map((r) => r.title_id);
+  const { rows: popular } = await pool.query(`
+    SELECT id AS title_id
+    FROM titles
+    ORDER BY popularity DESC NULLS LAST, id ASC
+    LIMIT 10
+  `);
+  return popular.map(r => r.title_id).slice(0, 3);
 }
 
 // This version uses /recs/by_seed on the recommender (by title_id)
+// Semantic fallback using existing recommender API: POST /recs/semantic
+// We convert seed title_id -> seed title string -> recommender semantic recs
 async function getSemanticFallback(seedTitleIds, target) {
   if (!seedTitleIds || seedTitleIds.length === 0) return [];
 
-  const seed = seedTitleIds[0];
+  const seedId = seedTitleIds[0];
 
   try {
-    const r = await fetch(
-      `${RECS_URL}/recs/by_seed?id=${encodeURIComponent(
-        seed
-      )}&topK=${encodeURIComponent(target)}`,
-      {
-        method: "GET",
-      }
+    // 1) look up the seed title text in DB
+    const q = await pool.query(
+      `SELECT name FROM titles WHERE id = $1 LIMIT 1`,
+      [seedId]
     );
+    const seedTitle = (q.rows?.[0]?.name || "").toString().trim();
+    if (!seedTitle) return [];
+
+    // 2) call recommender semantic endpoint (this exists in your /docs)
+    const r = await fetch(`${RECS_URL}/recs/semantic`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ query: seedTitle, topK: target }),
+    });
 
     if (!r.ok) {
-      console.error("semantic by_seed HTTP error:", r.status);
+      console.error("semantic fallback HTTP error:", r.status);
       return [];
     }
 
     const data = await r.json();
     return data.items || data.results || data.data || [];
   } catch (err) {
-    console.error("semantic by_seed error:", err);
+    console.error("semantic fallback error:", err);
     return [];
   }
 }
@@ -432,11 +462,10 @@ router.get("/cf", async (req, res) => {
 
     // 2) If CF is good enough, just return it
     if (cfItems && cfItems.length >= 5) {
-      return res.json({
-        ok: true,
-        items: cfItems.slice(0, TARGET),
-      });
+      return res.json({ ok: true, items: cfItems.slice(0, TARGET) });
     }
+      // else fall through to fallback logic
+    
 
     // 3) Otherwise, build seeds (from popular_titles)
     const seeds = await pickSeeds(5);
@@ -447,23 +476,15 @@ router.get("/cf", async (req, res) => {
       TARGET
     );
 
-    // 5) Merge + dedupe CF + semantic
-    const seen = new Set();
-    const merged = [];
 
-    for (const it of cfItems || []) {
-      const id = it.title_id || it.id;
-      if (!id || seen.has(id)) continue;
-      seen.add(id);
-      merged.push(it);
-    }
+    // Merge + semantic
+    const mergedRaw = [
+      ...(cfItems || []),
+      ...(semanticItems || []), 
+    ];
 
-    for (const it of semanticItems || []) {
-      const id = it.title_id || it.id;
-      if (!id || seen.has(id)) continue;
-      seen.add(id);
-      merged.push(it);
-    }
+    const merged = dedupeByTitleId(mergedRaw);
+
 
     return res.json({
       ok: true,
@@ -480,7 +501,12 @@ router.get("/cf_user", authRequired, async (req, res) => {
   try {
     const userId = req.user.id; // set by auth middleware
     const TARGET = Number(req.query.topK || 20);
-
+    const { rows: wlrows } = await pool.query(
+      "SELECT title_id FROM wishlists WHERE user_id = $1 ORDER BY ts DESC LIMIT 3",
+      [userId]
+    );
+    const wishlistIds = (wlrows || []).map((r) => r.title_id);
+    const wishlistSet = new Set(wishlistIds);
     // 1) CF-style: popular but excluding wishlist
     let cfItems = [];
     try {
@@ -510,32 +536,50 @@ router.get("/cf_user", authRequired, async (req, res) => {
     }
 
     // 2) If CF is good enough, just return it
-    if (cfItems && cfItems.length >= 5) {
-      return res.json({ ok: true, items: cfItems.slice(0, TARGET) });
+    if (wishlistIds.length === 0){  
+      if (cfItems && cfItems.length >= 5) {
+        return res.json({ ok: true, items: cfItems.slice(0, TARGET) });
+      }
+
     }
 
     // 3) Otherwise, pick seeds for this user (wishlist → popular_titles)
-    const seedIds = await pickSeedsForUser(userId);
+    const seedIds = wishlistIds.length > 0 ? wishlistIds : await pickSeedsForUser(userId);
+
 
     // 4) Semantic fallback using those seed IDs (via /recs/by_seed)
     const semanticItems = await getSemanticFallback(seedIds, TARGET);
-
-    // 5) Merge + dedupe CF + semantic
-    const seen = new Set();
-    const merged = [];
-
-    for (const it of cfItems || []) {
+    const semanticFiltered = (semanticItems || []).filter(it => {
       const id = it.title_id || it.id;
-      if (!id || seen.has(id)) continue;
-      seen.add(id);
-      merged.push(it);
-    }
+      return id && !wishlistSet.has(id);
+    });
 
-    for (const it of semanticItems || []) {
-      const id = it.title_id || it.id;
-      if (!id || seen.has(id)) continue;
-      seen.add(id);
-      merged.push(it);
+    const mergedRaw = [
+      ...(cfItems || []),
+      ...(semanticFiltered || []),
+    ];  
+
+    const merged = dedupeByTitleId(mergedRaw);
+
+    
+
+    if (merged.length < TARGET) {
+      const q = await pool.query(
+        `
+        SELECT
+          id AS title_id,
+          name AS title,
+          year,
+          poster_url,
+          0.1::float AS score
+        FROM titles
+        ORDER BY popularity DESC NULLS LAST, id ASC
+        LIMIT $1
+        `,
+        [TARGET]
+      );
+
+      return res.json({ ok: true, items: q.rows });
     }
 
     return res.json({ ok: true, items: merged.slice(0, TARGET) });

@@ -61,18 +61,18 @@ export default function Home() {
         )}
 
         <button
-          className="ml-auto text-xs px-2 py-1 rounded border dark:border-gray-700"
-          onClick={() => setRaw(r => (r ? null : { ...raw }))}
+          // className="ml-auto text-xs px-2 py-1 rounded border dark:border-gray-700"
+          // onClick={() => setRaw(r => (r ? null : { ...raw }))}
         >
-          {raw ? 'Hide raw' : 'Show raw'}
+          {/* {raw ? 'Hide raw' : 'Show raw'} */}
         </button>
       </div>
 
-      {raw && (
+      {/* {raw && (
         <pre className="text-xs p-2 rounded border dark:border-gray-800 overflow-auto max-h-40 mb-3">
           {JSON.stringify(raw, null, 2)}
         </pre>
-      )}
+      )} */}
 
       <div className="grid gap-3">
         {items.map((it, i) => (
