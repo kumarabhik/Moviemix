@@ -1,10 +1,16 @@
 param(
   [string]$Namespace = "moviemix",
   [string]$K8sDir = ".\infra\k8s",
-  [string]$JwtSecretValue = "super_secret_key_change_me"
+  [string]$JwtSecretValue = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+function New-RandomSecret {
+  param([int]$Length = 64)
+  $chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+  -join (1..$Length | ForEach-Object { $chars[(Get-Random -Minimum 0 -Maximum $chars.Length)] })
+}
 
 function Apply-Manifest {
   param([string]$Path)
@@ -23,8 +29,24 @@ function Ensure-BackendSecrets {
     [string]$JwtVal
   )
 
-  # Create / update backend-secrets with jwt_secret
-  # We use "apply" from generated YAML so it's idempotent.
+  if ([string]::IsNullOrWhiteSpace($JwtVal)) {
+    $existingSecretB64 = kubectl -n $Ns get secret backend-secrets -o jsonpath='{.data.jwt_secret}' 2>$null
+    if ($LASTEXITCODE -eq 0 -and ![string]::IsNullOrWhiteSpace($existingSecretB64)) {
+      try {
+        $JwtVal = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($existingSecretB64))
+        Write-Host "Reusing existing jwt_secret from backend-secrets."
+      } catch {
+        $JwtVal = ""
+      }
+    }
+  }
+
+  if ([string]::IsNullOrWhiteSpace($JwtVal)) {
+    $JwtVal = New-RandomSecret -Length 64
+    Write-Host "Generated strong JWT secret for backend-secrets."
+  }
+
+  # Create / update backend-secrets with jwt_secret (idempotent via apply).
   Write-Host "Ensuring secret: backend-secrets (jwt_secret) in namespace: $Ns"
 
   $secretYaml = @"
@@ -48,9 +70,10 @@ function Wait-For-Ready {
   )
 
   Write-Host "Waiting for pods in namespace: $Ns (timeout: $TimeoutSeconds s)"
-  kubectl -n $Namespace rollout status deploy/recommender --timeout=300s | Out-Host
-  kubectl -n $Namespace rollout status deploy/backend --timeout=300s | Out-Host
-  kubectl -n $Namespace rollout status deploy/frontend --timeout=300s | Out-Host
+  $timeoutArg = "$($TimeoutSeconds)s"
+  kubectl -n $Ns rollout status deploy/recommender --timeout=$timeoutArg | Out-Host
+  kubectl -n $Ns rollout status deploy/backend --timeout=$timeoutArg | Out-Host
+  kubectl -n $Ns rollout status deploy/frontend --timeout=$timeoutArg | Out-Host
 
 }
 
@@ -62,7 +85,7 @@ if (!(Test-Path $K8sDir)) {
 # ---- Apply in dependency order ----
 Apply-Manifest (Join-Path $K8sDir "namespace.yaml")
 
-# ✅ Ensure backend JWT secret exists BEFORE backend deploy starts
+# Ensure backend JWT secret exists BEFORE backend deploy starts
 Ensure-BackendSecrets -Ns $Namespace -JwtVal $JwtSecretValue
 
 # DB first so backend can connect

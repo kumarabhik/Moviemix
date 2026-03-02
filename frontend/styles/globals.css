@@ -1,58 +1,110 @@
+@import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700&family=Space+Grotesk:wght@500;700&display=swap");
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-html, body { height: 100%; }
+:root {
+  --bg-0: #f6f7fb;
+  --bg-1: #e7eefc;
+  --bg-2: #d9f7ec;
+  --text-primary: #0f172a;
+}
 
-/* Bootstrap auth pages - dark mode support */
+html.dark {
+  --bg-0: #05070d;
+  --bg-1: #0b1a2f;
+  --bg-2: #132a22;
+  --text-primary: #e5e7eb;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: "Manrope", "Segoe UI", sans-serif;
+  color: var(--text-primary);
+  background: linear-gradient(135deg, var(--bg-0), var(--bg-1), var(--bg-2));
+  background-attachment: fixed;
+}
+
+h1,
+h2,
+h3,
+.font-display {
+  font-family: "Space Grotesk", "Manrope", sans-serif;
+}
+
+.mm-bg {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 20% 15%, rgba(56, 189, 248, 0.2), transparent 32%),
+    radial-gradient(circle at 85% 10%, rgba(16, 185, 129, 0.16), transparent 34%),
+    radial-gradient(circle at 50% 90%, rgba(59, 130, 246, 0.14), transparent 38%);
+}
+
+.mm-header {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.22);
+  backdrop-filter: blur(10px);
+  background: rgba(255, 255, 255, 0.45);
+}
+
+html.dark .mm-header {
+  border-bottom-color: rgba(148, 163, 184, 0.25);
+  background: rgba(2, 6, 23, 0.55);
+}
+
+.mm-card {
+  background: rgba(255, 255, 255, 0.56);
+  box-shadow: 0 16px 35px rgba(15, 23, 42, 0.08);
+  transition: transform 180ms ease, box-shadow 180ms ease;
+}
+
+.mm-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 18px 38px rgba(15, 23, 42, 0.14);
+}
+
+html.dark .mm-card {
+  background: rgba(15, 23, 42, 0.62);
+  box-shadow: 0 16px 35px rgba(2, 6, 23, 0.45);
+}
+
+/* Bootstrap auth pages dark-mode tuning */
 html.dark .card {
-  background-color: #1f2937; /* gray-800 */
-  color: #f9fafb;            /* gray-50 */
+  background-color: #111827;
+  color: #f3f4f6;
 }
 
 html.dark .card-footer {
-  background-color: #1f2937;
+  background-color: #111827;
 }
 
 html.dark .text-muted {
-  color: #9ca3af !important;
+  color: #94a3b8 !important;
 }
 
 html.dark .form-control {
-  background-color: #111827;
+  background-color: #0b1220;
   color: #f9fafb;
-  border-color: #374151;
+  border-color: #334155;
 }
 
 html.dark .form-control:focus {
-  background-color: #111827;
+  background-color: #0b1220;
   color: #f9fafb;
 }
 
 html.dark label {
-  color: #d1d5db;
+  color: #dbeafe;
 }
 
 html.dark a.text-dark {
   color: #93c5fd !important;
 }
 
-/* Auth page background */
-:root {
-  --auth-bg: #f9fafb; /* light */
-}
-
-html.dark {
-  --auth-bg: #030712; /* near-black */
-}
-
-
-/* Full-page background for light/dark */
-body {
-  background-color: #f9fafb;            /* light */
-  transition: background-color 0.3s ease;
-}
-
-html.dark body {
-  background-color: #030712;           /* dark */
-}

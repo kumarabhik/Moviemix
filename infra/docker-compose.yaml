@@ -6,9 +6,9 @@ services:
     container_name: moviemix-db
     restart: unless-stopped
     environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: I4mGr00t
-      POSTGRES_DB: moviemix
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     ports: ["5432:5432"]
     volumes:
       - dbdata:/var/lib/postgresql/data
@@ -72,7 +72,7 @@ services:
       AIRFLOW__CORE__LOAD_EXAMPLES: "False"
       AIRFLOW__WEBSERVER__BASE_URL: "http://localhost:8080"
       AIRFLOW_UID: "50000"
-      AIRFLOW_CONN_MOVIEMIX_PG: "postgresql://admin:I4mGr00t@db:5432/moviemix"
+      AIRFLOW_CONN_MOVIEMIX_PG: "${DATABASE_URL}"
     user: "50000:0"
     volumes:
       - ../airflow/dags:/opt/airflow/dags

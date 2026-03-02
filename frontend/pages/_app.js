@@ -1,98 +1,84 @@
-// frontend/pages/_app.js
-
-import "bootstrap/dist/css/bootstrap.min.css"; // Bootstrap global styles
-// import { useEffect } from "react";
+import "bootstrap/dist/css/bootstrap.min.css";
+import "../styles/globals.css";
 
 import { useEffect, useState } from "react";
-import "../styles/globals.css";                // Your Tailwind/global styles
-
-import { isLoggedIn, logout } from "../lib/session";
 import Link from "next/link";
+
+import { getToken, isLoggedIn, logout } from "../lib/session";
 
 function Header({ dark, setDark }) {
   const [logged, setLogged] = useState(false);
 
   useEffect(() => {
-    setLogged(isLoggedIn());
+    const refresh = () => setLogged(isLoggedIn());
+    refresh();
+    window.addEventListener("storage", refresh);
+    return () => window.removeEventListener("storage", refresh);
   }, []);
 
   return (
-    <header className="p-4 flex items-center justify-between border-b border-gray-200 dark:border-gray-800">
-      <Link href="/" className="font-semibold">
+    <header className="mm-header p-4 flex items-center justify-between gap-4">
+      <Link href="/" className="font-semibold tracking-wide text-lg">
         MovieMix
       </Link>
 
-      <div className="flex items-center gap-3">
+      <nav className="flex items-center gap-3 sm:gap-4">
         {logged ? (
           <>
-            <Link href="/foryou" className="text-sm text-blue-600">
+            <Link href="/foryou" className="text-sm hover:underline">
               For You
             </Link>
-            <Link href="/wishlist" className="text-sm text-blue-600">
+            <Link href="/wishlist" className="text-sm hover:underline">
               Wishlist
+            </Link>
+            <Link href="/experiment" className="text-sm hover:underline">
+              Experiments
             </Link>
             <button
               onClick={() => {
                 logout();
-                window.location.reload();
+                window.location.href = "/login";
               }}
-              className="text-sm text-blue-600"
+              className="text-sm hover:underline"
             >
               Logout
             </button>
           </>
         ) : (
-          <Link href="/login" className="text-sm text-blue-600">
+          <Link href="/login" className="text-sm hover:underline">
             Login
           </Link>
         )}
 
         <button
-          className="px-3 py-1 rounded border dark:border-gray-700"
+          className="px-3 py-1 rounded-lg border border-slate-300/70 dark:border-slate-700/70 text-sm"
           onClick={() => setDark((d) => !d)}
+          type="button"
         >
           {dark ? "Light" : "Dark"}
         </button>
-      </div>
+      </nav>
     </header>
   );
 }
 
-function MyApp({ Component, pageProps }) {
+export default function MyApp({ Component, pageProps }) {
   const [dark, setDark] = useState(false);
 
-  // On first mount, read saved theme
   useEffect(() => {
-    if (typeof window === "undefined") return;
     const stored = window.localStorage.getItem("moviemix_theme");
-    if (stored === "dark") {
-      setDark(true);
-    }
+    if (stored === "dark") setDark(true);
   }, []);
 
-  // Whenever dark changes, update <html> and save to localStorage
   useEffect(() => {
-    if (typeof document !== "undefined") {
-      document.documentElement.classList.toggle("dark", dark);
-    }
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem("moviemix_theme", dark ? "dark" : "light");
-    }
+    document.documentElement.classList.toggle("dark", dark);
+    window.localStorage.setItem("moviemix_theme", dark ? "dark" : "light");
   }, [dark]);
 
-  // ===== Session start logging (once per tab) =====
   useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    // prevent double-logging in the same tab (StrictMode, rerenders)
     if (sessionStorage.getItem("mm_session_started") === "1") return;
-
-    const token =
-      localStorage.getItem("moviemix_token") ||
-      localStorage.getItem("token");
-
+    const token = getToken();
     if (!token) return;
-
     sessionStorage.setItem("mm_session_started", "1");
 
     fetch("/api/interactions", {
@@ -107,19 +93,17 @@ function MyApp({ Component, pageProps }) {
       }),
     }).catch(() => {});
   }, []);
-  // ==============================================
 
-
-
-  // 🔹 No bg-* here → background comes from body (globals.css)
   return (
-    <div className="min-h-screen text-gray-900 dark:text-gray-100">
-      <Header dark={dark} setDark={setDark} />
-      <main className="max-w-4xl mx-auto p-4">
-        <Component {...pageProps} />
-      </main>
+    <div className="min-h-screen text-slate-900 dark:text-slate-100">
+      <div className="mm-bg" />
+      <div className="relative z-10">
+        <Header dark={dark} setDark={setDark} />
+        <main className="max-w-5xl mx-auto p-4">
+          <Component {...pageProps} />
+        </main>
+      </div>
     </div>
   );
 }
 
-export default MyApp;

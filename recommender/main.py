@@ -15,7 +15,9 @@ from prometheus_fastapi_instrumentator import Instrumentator
 # ---------------------------
 # Configuration
 # ---------------------------
-DB_URL = os.getenv("DATABASE_URL", "postgresql://admin:I4mGr00t@db:5432/moviemix")
+DB_URL = os.getenv("DATABASE_URL")
+if not DB_URL:
+    raise RuntimeError("DATABASE_URL is required for recommender service startup.")
 DATA_DIR = os.getenv("DATA_DIR", "/app/data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -77,6 +79,24 @@ FEATURE_COLUMNS = [
     "genre_overlap_user",
     "in_user_wishlist",
 ]
+
+
+def _normalize_title(value: str) -> str:
+    return " ".join(str(value or "").lower().split())
+
+
+def _dedupe_items_by_title(items):
+    seen = set()
+    out = []
+    for it in items or []:
+        title = _normalize_title(it.get("title"))
+        title_id = it.get("title_id")
+        key = f"title:{title}" if title else f"id:{title_id}"
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(it)
+    return out
 
 
 def _load_xgb_model():
@@ -343,8 +363,12 @@ def recs_semantic(req: SemanticReq):
     )
     q = _normalize(q.astype("float32"))
 
-    # 2) FAISS search
-    D, I = _index.search(q, max(1, req.topK))
+    top_k = max(1, int(req.topK or 10))
+    candidate_pool = max(top_k * 8, 60)
+    candidate_pool = min(candidate_pool, int(_index.ntotal))
+
+    # 2) FAISS search on larger candidate pool for better reranking quality
+    D, I = _index.search(q, candidate_pool)
     I = I[0]
     D = D[0]
 
@@ -364,8 +388,10 @@ def recs_semantic(req: SemanticReq):
             }
         )
 
-    # 4) RERANK WITH XGBOOST IF MODEL IS LOADED
+    # 4) Rerank with XGBoost if model is loaded
     items = rerank_with_xgb(items)
+    items = _dedupe_items_by_title(items)
+    items = items[:top_k]
 
     # 5) Convert back to RecItem list
     out: List[RecItem] = [
@@ -396,5 +422,16 @@ def recs_content(req: ContentReq):
     if _index is None and not _load_index_if_exists():
         raise HTTPException(400, "Index not built. Call /admin/build_embeddings first.")
 
-    # delegate to the semantic pipeline
-    return recs_semantic(SemanticReq(query=req.seed_text, topK=req.topK))
+    # Use a wider semantic pool, then remove seed-title self matches.
+    top_k = max(1, int(req.topK or 10))
+    seed_norm = _normalize_title(req.seed_text)
+    base = recs_semantic(SemanticReq(query=req.seed_text, topK=max(top_k * 3, 30)))
+
+    filtered = []
+    for it in base:
+        title_norm = _normalize_title(it.title)
+        if seed_norm and title_norm == seed_norm:
+            continue
+        filtered.append(it)
+
+    return filtered[:top_k]

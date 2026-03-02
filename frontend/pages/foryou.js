@@ -1,14 +1,14 @@
-// frontend/pages/foryou.js
 import { useEffect, useState } from "react";
+import Link from "next/link";
+
 import MovieCard from "../components/MovieCard";
 import { getWishlist, toArray } from "../lib/api";
-// import { isLoggedIn } from "../lib/session";
 import {
-  isLoggedIn,
+  abVariantFromUserId,
   getToken,
   getUserIdFromToken,
-  abVariantFromUserId,
   isAbEnabled,
+  isLoggedIn,
 } from "../lib/session";
 
 export default function ForYou() {
@@ -18,32 +18,22 @@ export default function ForYou() {
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(true);
   const [ab, setAb] = useState("A");
-  const [uidDbg, setUidDbg] = useState("");
 
-  // Remove from visible list + pull next from buffer
   const handleWishlisted = (titleId) => {
-    // 1) remove from visible list
     setItems((prev) => prev.filter((x) => x.title_id !== titleId));
-
-    // 2) mark as saved in UI set
     setSavedIds((prev) => {
       const next = new Set(prev);
       next.add(titleId);
       return next;
     });
-
-    // 3) refill from buffer
     setBuffer((prevBuf) => {
-      if (!prevBuf || prevBuf.length === 0) return prevBuf;
-
+      if (!prevBuf?.length) return prevBuf;
       const [next, ...rest] = prevBuf;
-
       setItems((prevItems) => {
         const ids = new Set(prevItems.map((x) => x.title_id));
-        if (ids.has(next.title_id)) return prevItems; // safety
+        if (ids.has(next.title_id)) return prevItems;
         return [...prevItems, next];
       });
-
       return rest;
     });
   };
@@ -54,116 +44,50 @@ export default function ForYou() {
         setErr("");
         setLoading(true);
 
-        // IMPORTANT: keep a local Set for filtering (React state updates are async)
         let wishlistIdSet = new Set();
-
-        // 1) If logged in, load wishlist and build a Set of saved ids
         if (isLoggedIn()) {
           try {
             const w = await getWishlist();
-            const wItems = toArray(w);
-
             wishlistIdSet = new Set(
-              wItems
+              toArray(w)
                 .map((it) => it.title_id ?? it.id)
                 .filter((v) => v != null)
             );
-
             setSavedIds(wishlistIdSet);
-          } catch (e) {
-            console.warn("wishlist load failed on ForYou:", e);
-            wishlistIdSet = new Set();
+          } catch {
             setSavedIds(new Set());
           }
-        } else {
-          wishlistIdSet = new Set();
-          setSavedIds(new Set());
         }
 
-        let res;
-        let json;
-        let usedPersonalized = false;
-
-        // 2) Try personalized recs if we have a token
-        let token = null;
-        if (typeof window !== "undefined") {
-          token =
-            window.localStorage.getItem("moviemix_token") ||
-            window.localStorage.getItem("token");
-        }
-
-        // ---- A/B decision (SAFE: flag-controlled) ----
+        const token = getToken();
         const enabled = isAbEnabled();
-
-        // Try decode userId from JWT; if it fails, fallback to token string (still stable per user)
         const uid = token ? getUserIdFromToken(token) : "";
-        const splitKey = uid || token || "";
-
-        setUidDbg(uid || "");
-
+        const splitKey = uid || token || "anon";
         const variant = enabled ? abVariantFromUserId(splitKey) : "A";
         setAb(variant);
 
-        console.log(
-          "AB enabled:",
-          enabled,
-          "uid:",
-          uid,
-          "splitKeyLen:",
-          splitKey.length,
-          "variant:",
-          variant
-        );
-
-        // Choose endpoint
         const endpoint =
-          !enabled
-            ? "/api/recs/cf_user"
-            : variant === "A"
-            ? "/api/recs/cf_user"
-            : "/api/recs/cf";
+          !enabled || variant === "A" ? "/api/recs/cf_user" : "/api/recs/cf";
 
-        // Call personalized endpoint only if needed
-        if (token && endpoint === "/api/recs/cf_user") {
-          res = await fetch(endpoint, {
+        let json = { items: [] };
+        if (endpoint === "/api/recs/cf_user" && token) {
+          const resp = await fetch(endpoint, {
             cache: "no-store",
             headers: { Authorization: `Bearer ${token}` },
           });
-          json = await res.json();
-
-          if (res.ok && Array.isArray(json.items) && json.items.length > 0) {
-            const all = json.items || [];
-            const filtered = all.filter((x) => !wishlistIdSet.has(x.title_id));
-
-            // Show 20, keep buffer of next 40
-            const display = filtered.slice(0, 20);
-            const buff = filtered.slice(20, 60);
-
-            setItems(display);
-            setBuffer(buff);
-            usedPersonalized = true;
-          }
+          json = await resp.json().catch(() => ({}));
+          if (!resp.ok) throw new Error(json?.error || "cf_user_failed");
+        } else {
+          const resp = await fetch("/api/recs/cf", { cache: "no-store" });
+          json = await resp.json().catch(() => ({}));
+          if (!resp.ok) throw new Error(json?.error || "cf_failed");
         }
 
-        // 3) Fallback OR B-variant path: global popular CF
-        if (!usedPersonalized) {
-          res = await fetch("/api/recs/cf", { cache: "no-store" });
-          json = await res.json();
-          if (!res.ok) {
-            throw new Error(json?.error || "cf_failed");
-          }
-
-          const all = json.items || [];
-          const filtered = all.filter((x) => !wishlistIdSet.has(x.title_id));
-
-          const display = filtered.slice(0, 20);
-          const buff = filtered.slice(20, 60);
-
-          setItems(display);
-          setBuffer(buff);
-        }
+        const all = Array.isArray(json.items) ? json.items : [];
+        const filtered = all.filter((x) => !wishlistIdSet.has(x.title_id));
+        setItems(filtered.slice(0, 20));
+        setBuffer(filtered.slice(20, 60));
       } catch (e) {
-        console.error(e);
         setErr(String(e.message || e));
       } finally {
         setLoading(false);
@@ -172,19 +96,37 @@ export default function ForYou() {
   }, []);
 
   return (
-    <div className="space-y-3">
-      <h1 className="text-xl font-semibold">For You</h1>
-      <p className="text-xs text-gray-500">AB Variant: {ab}</p>
-      <p className="text-xs text-gray-400">
-        uid: {uidDbg ? uidDbg : "(missing)"}
-      </p>
+    <div className="space-y-4">
+      <header className="rounded-2xl border border-white/20 bg-white/50 dark:bg-slate-900/50 p-4 backdrop-blur">
+        <div className="flex items-center justify-between gap-3">
+          <h1 className="text-xl sm:text-2xl font-semibold">For You</h1>
+          <span className="text-xs rounded-full px-2 py-1 bg-amber-500/20 text-amber-700 dark:text-amber-300">
+            Experiment Variant {ab}
+          </span>
+        </div>
+        <p className="text-sm mt-2 text-slate-600 dark:text-slate-300">
+          Personal feed optimized by collaborative signals and semantic fallback.
+          <Link href="/experiment" className="ml-2 underline">
+            View experiment metrics
+          </Link>
+        </p>
+      </header>
 
-      {loading && <div>Loading…</div>}
+      {loading && (
+        <div className="grid gap-3">
+          {[1, 2, 3].map((i) => (
+            <div
+              key={i}
+              className="rounded-2xl border border-white/20 bg-white/40 dark:bg-slate-900/40 p-4 h-48 animate-pulse"
+            />
+          ))}
+        </div>
+      )}
       {err && <div className="text-red-600 text-sm">{err}</div>}
-
       {!loading && !err && items.length === 0 && (
-        <div className="text-sm text-gray-500">
-          No recommendations yet. Try adding some titles to your wishlist.
+        <div className="text-sm text-slate-500">
+          No recommendations yet. Add a few titles to your wishlist to improve
+          personalization.
         </div>
       )}
 
@@ -199,6 +141,8 @@ export default function ForYou() {
               plot: it.plot,
               poster_url: it.poster_url,
               score: it.score,
+              reason: it.reason,
+              reason_code: it.reason_code,
             }}
             abVariant={ab}
             initialSaved={savedIds.has(it.title_id)}
@@ -209,3 +153,4 @@ export default function ForYou() {
     </div>
   );
 }
+

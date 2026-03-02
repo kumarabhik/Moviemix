@@ -1,17 +1,16 @@
 import os
-import math
-import requests
+
 import psycopg2
+import requests
 from psycopg2.extras import execute_batch
 
 TRAKT_CLIENT_ID = os.environ.get("TRAKT_CLIENT_ID")
 if not TRAKT_CLIENT_ID:
-    raise SystemExit("TRAKT_CLIENT_ID not set in env")
+    raise SystemExit("TRAKT_CLIENT_ID is required")
 
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://admin:I4mGr00t@localhost:5432/moviemix",
-)
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise SystemExit("DATABASE_URL is required")
 
 BASE_URL = "https://api.trakt.tv"
 HEADERS = {
@@ -24,17 +23,17 @@ HEADERS = {
 def fetch_popular_movies(pages=5, per_page=50):
     movies = []
     for page in range(1, pages + 1):
-        r = requests.get(
+        resp = requests.get(
             f"{BASE_URL}/movies/popular",
             params={"page": page, "limit": per_page},
             headers=HEADERS,
             timeout=15,
         )
-        r.raise_for_status()
-        chunk = r.json()
-        if not chunk:
+        resp.raise_for_status()
+        payload = resp.json()
+        if not payload:
             break
-        movies.extend(chunk)
+        movies.extend(payload)
     return movies
 
 
@@ -46,18 +45,13 @@ def main():
     cur = conn.cursor()
 
     rows = []
-    for m in movies:
-        title = m.get("title")
-        year = m.get("year")
-        ids = m.get("ids") or {}
-        imdb_id = ids.get("imdb")
-        trakt_id = ids.get("trakt")
-        trakt_slug = ids.get("slug")
-
+    for movie in movies:
+        title = movie.get("title")
+        year = movie.get("year")
+        ids = movie.get("ids") or {}
         if not title:
             continue
-
-        rows.append((imdb_id, trakt_id, trakt_slug, title, year))
+        rows.append((ids.get("imdb"), ids.get("trakt"), ids.get("slug"), title, year))
 
     sql = """
     INSERT INTO titles (imdb_id, trakt_id, trakt_slug, name, year)
@@ -67,7 +61,7 @@ def main():
           trakt_slug = EXCLUDED.trakt_slug,
           name = EXCLUDED.name,
           year = EXCLUDED.year,
-          updated_at = now();
+          updated_at = now()
     """
 
     execute_batch(cur, sql, rows, page_size=100)
@@ -79,3 +73,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -1,34 +1,49 @@
 services:
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v2.54.1
     container_name: moviemix-prometheus
     restart: unless-stopped
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./monitoring/alert.rules.yml:/etc/prometheus/alert.rules.yml:ro
+      - prometheus-data:/prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
     ports:
       - "9090:9090"
     depends_on:
       - alertmanager
 
   alertmanager:
-    image: prom/alertmanager:latest
+    image: prom/alertmanager:v0.27.0
     container_name: moviemix-alertmanager
     restart: unless-stopped
+    environment:
+      - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL:-http://host.docker.internal:19093/alerts}
     volumes:
       - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
     command:
       - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--config.expand-env"
     ports:
       - "9093:9093"
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:11.2.2
     container_name: moviemix-grafana
     restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - grafana-data:/var/lib/grafana
     ports:
       - "3001:3000"
     depends_on:
       - prometheus
+
+volumes:
+  prometheus-data:
+  grafana-data:

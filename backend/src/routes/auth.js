@@ -3,9 +3,9 @@ import express from "express";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import pool from "../db.js";
+import { JWT_SECRET } from "../config.js";
 
 const router = express.Router();
-const JWT_SECRET = process.env.JWT_SECRET || "dev_secret_change_me";
 
 // helper to issue a JWT
 function issueToken(user) {

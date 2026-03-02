@@ -16,29 +16,75 @@ spec:
       containers:
         - name: airflow
           image: apache/airflow:2.10.2
-          command: ["bash","-lc"]
+          command: ["bash", "-lc"]
           args:
             - >
-              airflow db init &&
-              airflow users create
-              --username admin
-              --password admin
-              --firstname A
-              --lastname K
-              --role Admin
-              --email admin@example.com &&
-              airflow webserver & airflow scheduler
+              airflow db migrate &&
+              if [ -n "$AIRFLOW_ADMIN_USER" ] && [ -n "$AIRFLOW_ADMIN_PASSWORD" ]; then
+                airflow users create
+                --username "$AIRFLOW_ADMIN_USER"
+                --password "$AIRFLOW_ADMIN_PASSWORD"
+                --firstname "${AIRFLOW_ADMIN_FIRSTNAME:-MovieMix}"
+                --lastname "${AIRFLOW_ADMIN_LASTNAME:-Admin}"
+                --role Admin
+                --email "${AIRFLOW_ADMIN_EMAIL:-admin@example.com}" || true;
+              fi &&
+              airflow webserver & exec airflow scheduler
           env:
             - name: AIRFLOW__CORE__LOAD_EXAMPLES
               value: "False"
             - name: AIRFLOW__WEBSERVER__BASE_URL
-              value: "http://localhost:8080"
+              value: "http://airflow:8080"
             - name: AIRFLOW_UID
               value: "50000"
             - name: AIRFLOW_CONN_MOVIEMIX_PG
-              value: postgresql://admin:I4mGr00t@db:5432/moviemix
+              valueFrom:
+                secretKeyRef:
+                  name: moviemix-secrets
+                  key: DATABASE_URL
+            - name: AIRFLOW_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: moviemix-secrets
+                  key: AIRFLOW_ADMIN_USER
+                  optional: true
+            - name: AIRFLOW_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: moviemix-secrets
+                  key: AIRFLOW_ADMIN_PASSWORD
+                  optional: true
+            - name: AIRFLOW_ADMIN_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: moviemix-secrets
+                  key: AIRFLOW_ADMIN_EMAIL
+                  optional: true
           ports:
             - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
 ---
 apiVersion: v1
 kind: Service

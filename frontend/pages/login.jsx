@@ -35,7 +35,7 @@ export default function LoginPage() {
                 style={{
                   width: "72px",
                   height: "72px",
-                  backgroundColor: "#6f42c1", // Bootstrap purple
+                  backgroundColor: "#0ea5e9",
                   color: "white",
                   fontSize: "2rem",
                   fontWeight: "700",

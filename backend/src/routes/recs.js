@@ -1,14 +1,13 @@
-// backend/src/routes/recs.js
 import express from "express";
 import fetch from "node-fetch";
 import pool from "../db.js";
 import authRequired from "../middleware/auth.js";
+import { withRecommendationReason } from "../utils/reasoning.js";
 
 const router = express.Router();
 const RECS_URL = process.env.RECS_URL || "http://recommender:8001";
 const OMDB_KEY = process.env.OMDB_API_KEY || process.env.OMDB_KEY || "";
 
-// no-cache for all /api/recs/*
 router.use((req, res, next) => {
   res.set("Cache-Control", "no-store");
   res.set("Pragma", "no-cache");
@@ -28,26 +27,35 @@ async function omdbPoster(imdbId) {
   return null;
 }
 
-//dedupe duplicates 
 function dedupeByTitleId(items) {
   const seen = new Set();
   const out = [];
 
   for (const it of items || []) {
-    const id = it?.title_id ?? it?.id;
-    if (!id) continue;
+    const imdb = String(it?.imdb_id || "").trim().toLowerCase();
+    const trakt = String(it?.trakt_id || "").trim().toLowerCase();
+    const title = String(it?.title || it?.name || "")
+      .trim()
+      .toLowerCase();
+    const year = String(it?.year || "").trim();
+    const id = String(it?.title_id ?? it?.id ?? "").trim();
 
-    if (seen.has(id)) continue; // exact duplicate movie
-    seen.add(id);
+    const keys = [];
+    if (imdb) keys.push(`imdb:${imdb}`);
+    if (trakt) keys.push(`trakt:${trakt}`);
+    if (title && year) keys.push(`title_year:${title}:${year}`);
+    if (title) keys.push(`title:${title}`);
+    if (id) keys.push(`id:${id}`);
+    if (keys.length === 0) continue;
+
+    if (keys.some((k) => seen.has(k))) continue;
+    keys.forEach((k) => seen.add(k));
     out.push(it);
   }
 
   return out;
 }
 
-
-
-// Normalize recommender response into an array
 function toArray(res) {
   if (!res) return [];
   if (Array.isArray(res)) return res;
@@ -57,9 +65,54 @@ function toArray(res) {
   return [];
 }
 
-// --- CF + semantic hybrid helpers (global) ---
+async function fetchTitleRowByIdOrName(titleId, titleName) {
+  if (titleId) {
+    const byId = await pool.query(
+      `SELECT id, name, year, imdb_id, trakt_id, trakt_slug, poster_url, plot, genres
+       FROM titles
+       WHERE id = $1
+       LIMIT 1`,
+      [titleId]
+    );
+    if (byId.rows[0]) return byId.rows[0];
+  }
 
-// Basic CF from DB (public.popular_titles)
+  if (!titleName) return null;
+  const byName = await pool.query(
+    `SELECT id, name, year, imdb_id, trakt_id, trakt_slug, poster_url, plot, genres
+     FROM titles
+     WHERE lower(name) = lower($1)
+     ORDER BY popularity DESC NULLS LAST
+     LIMIT 1`,
+    [titleName]
+  );
+  return byName.rows[0] || null;
+}
+
+async function enrichCandidate(it) {
+  const titleId = it?.title_id || it?.id || null;
+  const titleName = (it?.title || it?.name || "").toString();
+  const row = await fetchTitleRowByIdOrName(titleId, titleName);
+
+  let posterUrl = row?.poster_url || null;
+  if (!posterUrl && row?.imdb_id) {
+    posterUrl = await omdbPoster(row.imdb_id);
+  }
+
+  return {
+    title_id: titleId || row?.id || null,
+    title: titleName || row?.name || null,
+    score: typeof it?.score === "number" ? it.score : it?.similarity ?? null,
+    year: row?.year ?? null,
+    imdb_id: row?.imdb_id ?? null,
+    trakt_id: row?.trakt_id ?? null,
+    trakt_slug: row?.trakt_slug ?? null,
+    plot: row?.plot ?? null,
+    genres: row?.genres ?? null,
+    poster_url: posterUrl || null,
+  };
+}
+
 async function getCfRecs(limit = 20) {
   const q = await pool.query(
     `SELECT t.id AS title_id,
@@ -76,7 +129,6 @@ async function getCfRecs(limit = 20) {
   return q.rows;
 }
 
-// Pick seeds for semantic fallback (here: just from popular_titles)
 async function pickSeeds(limit = 5) {
   const q = await pool.query(
     `SELECT t.id AS title_id,
@@ -90,12 +142,11 @@ async function pickSeeds(limit = 5) {
   return q.rows;
 }
 
-// Call semantic recommender using seed titles (by name) and enrich from DB
 async function getSemanticFallbackFromSeeds(seeds, target = 10) {
   if (!seeds || seeds.length === 0) return [];
 
   const collected = [];
-  const seen = new Set(); // dedupe by title_id
+  const seen = new Set();
 
   for (const seed of seeds) {
     const seedTitle = (seed.title || seed.name || "").toString().trim();
@@ -109,11 +160,7 @@ async function getSemanticFallbackFromSeeds(seeds, target = 10) {
       });
 
       if (!r.ok) {
-        console.error(
-          "semantic fallback HTTP error for seed:",
-          seedTitle,
-          r.status
-        );
+        console.error("semantic fallback HTTP error for seed:", seedTitle, r.status);
         continue;
       }
 
@@ -121,55 +168,17 @@ async function getSemanticFallbackFromSeeds(seeds, target = 10) {
       const items = toArray(base);
 
       for (const it of items) {
-        if (collected.length >= target * 2) break; // safety cap
+        if (collected.length >= target * 2) break;
 
-        const rawId = it.title_id || it.id || null;
-        const rawName = (it.title || it.name || "").toString();
-
-        let row = null;
-
-        // Try by id first
-        if (rawId) {
-          const q = await pool.query(
-            `SELECT id, name, year, imdb_id, trakt_id, trakt_slug, poster_url, plot, genres
-             FROM titles
-             WHERE id = $1
-             LIMIT 1`,
-            [rawId]
-          );
-          row = q.rows[0] || null;
-        }
-
-        // Fallback: lookup by name
-        if (!row && rawName) {
-          const q = await pool.query(
-            `SELECT id, name, year, imdb_id, trakt_id, trakt_slug, poster_url, plot, genres
-             FROM titles
-             WHERE lower(name) = lower($1)
-             ORDER BY popularity DESC NULLS LAST
-             LIMIT 1`,
-            [rawName]
-          );
-          row = q.rows[0] || null;
-        }
-
-        const finalId = rawId || row?.id || null;
+        const enriched = await enrichCandidate(it);
+        const finalId = enriched.title_id;
         if (!finalId || seen.has(finalId)) continue;
 
-        let poster_url = row?.poster_url || null;
-        if (!poster_url && row?.imdb_id) {
-          poster_url = await omdbPoster(row.imdb_id);
-        }
-
         seen.add(finalId);
-
         collected.push({
-          title_id: finalId,
-          title: rawName || row?.name || null,
-          year: row?.year ?? null,
-          poster_url: poster_url || null,
-          score:
-            typeof it.score === "number" ? it.score : it.similarity ?? null,
+          ...enriched,
+          _strategy: "semantic_fallback_seed",
+          _seed_text: seedTitle,
         });
       }
     } catch (err) {
@@ -180,75 +189,59 @@ async function getSemanticFallbackFromSeeds(seeds, target = 10) {
   return collected.slice(0, target);
 }
 
-// --- User-specific helpers you asked for ---
-
 async function pickSeedsForUser(userId) {
-  // Option A: wishlist first
   const { rows: wl } = await pool.query(
     "SELECT title_id FROM wishlists WHERE user_id = $1 ORDER BY ts DESC LIMIT 3",
     [userId]
   );
   if (wl.length > 0) return wl.map((r) => r.title_id);
 
-  // Option B: fallback to most popular titles
   const { rows: popular } = await pool.query(`
     SELECT id AS title_id
     FROM titles
     ORDER BY popularity DESC NULLS LAST, id ASC
     LIMIT 10
   `);
-  return popular.map(r => r.title_id).slice(0, 3);
+  return popular.map((r) => r.title_id).slice(0, 3);
 }
 
-// This version uses /recs/by_seed on the recommender (by title_id)
-// Semantic fallback using existing recommender API: POST /recs/semantic
-// We convert seed title_id -> seed title string -> recommender semantic recs
 async function getSemanticFallback(seedTitleIds, target) {
   if (!seedTitleIds || seedTitleIds.length === 0) return [];
 
   const seedId = seedTitleIds[0];
-
   try {
-    // 1) look up the seed title text in DB
-    const q = await pool.query(
-      `SELECT name FROM titles WHERE id = $1 LIMIT 1`,
-      [seedId]
-    );
+    const q = await pool.query("SELECT name FROM titles WHERE id = $1 LIMIT 1", [
+      seedId,
+    ]);
     const seedTitle = (q.rows?.[0]?.name || "").toString().trim();
     if (!seedTitle) return [];
 
-    // 2) call recommender semantic endpoint (this exists in your /docs)
     const r = await fetch(`${RECS_URL}/recs/semantic`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ query: seedTitle, topK: target }),
     });
-
     if (!r.ok) {
       console.error("semantic fallback HTTP error:", r.status);
       return [];
     }
 
     const data = await r.json();
-    return data.items || data.results || data.data || [];
+    return toArray(data);
   } catch (err) {
     console.error("semantic fallback error:", err);
     return [];
   }
 }
 
-// GET /api/recs/semantic?query=...&topK=5
 router.get("/semantic", async (req, res) => {
   try {
     const query = (req.query.query || "").toString().trim();
     const topK = Number(req.query.topK || 5);
     if (!query) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "query is required" });
+      return res.status(400).json({ ok: false, error: "query is required" });
     }
 
-    // 1) ask recommender (semantic/embedding-based)
     const r = await fetch(`${RECS_URL}/recs/semantic`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -258,106 +251,64 @@ router.get("/semantic", async (req, res) => {
     if (!r.ok) return res.status(r.status).json(base);
 
     const items = toArray(base);
-
-    // 2) enrich semantic candidates from DB
     const enriched = [];
     for (const it of items) {
-      const titleId = it.title_id || it.id || null;
-      const titleName = (it.title || it.name || "").toString();
-
-      let row = null;
-
-      if (titleId) {
-        const q = await pool.query(
-          `SELECT id, name, year, imdb_id, trakt_id, trakt_slug, poster_url, plot, genres 
-           FROM titles WHERE id = $1 LIMIT 1`,
-          [titleId]
-        );
-        row = q.rows[0] || null;
-      }
-
-      if (!row && titleName) {
-        const q = await pool.query(
-          `SELECT id, name, year, imdb_id, trakt_id, trakt_slug, poster_url, plot, genres 
-           FROM titles 
-           WHERE lower(name) = lower($1)
-           ORDER BY popularity DESC NULLS LAST
-           LIMIT 1`,
-          [titleName]
-        );
-        row = q.rows[0] || null;
-      }
-
-      let poster_url = row?.poster_url || null;
-      if (!poster_url && row?.imdb_id) {
-        poster_url = await omdbPoster(row.imdb_id);
-      }
-
-      enriched.push({
-        title_id: titleId || row?.id || null,
-        title: titleName || row?.name || null,
-        score:
-          typeof it.score === "number" ? it.score : it.similarity ?? null,
-        year: row?.year ?? null,
-        imdb_id: row?.imdb_id ?? null,
-        trakt_id: row?.trakt_id ?? null,
-        trakt_slug: row?.trakt_slug ?? null,
-        plot: row?.plot ?? null,
-        genres: row?.genres ?? null,
-        poster_url: poster_url || null,
-      });
+      const candidate = await enrichCandidate(it);
+      enriched.push({ ...candidate, _strategy: "semantic" });
     }
 
-    // 3) ALSO: lexical title search (LIKE %query%) to catch franchises like "Ice Age"
-    const likePattern = `%${query}%`;
     const lexical = await pool.query(
       `SELECT id, name, year, imdb_id, trakt_id, trakt_slug, poster_url, plot, genres
        FROM titles
        WHERE lower(name) LIKE lower($1)
        ORDER BY popularity DESC NULLS LAST
        LIMIT 50`,
-      [likePattern]
+      [`%${query}%`]
     );
 
     const byId = new Map(enriched.map((it) => [it.title_id, it]));
-
     for (const row of lexical.rows) {
-      if (!byId.has(row.id)) {
-        // not in semantic candidates -> add it with a base score
-        enriched.push({
-          title_id: row.id,
-          title: row.name,
-          score: 0.5, // base score for lexical-only hits
-          year: row.year,
-          imdb_id: row.imdb_id,
-          trakt_id: row.trakt_id,
-          trakt_slug: row.trakt_slug,
-          plot: row.plot,
-          genres: row.genres,
-          poster_url: row.poster_url,
-        });
-      }
+      if (byId.has(row.id)) continue;
+      enriched.push({
+        title_id: row.id,
+        title: row.name,
+        score: 0.5,
+        year: row.year,
+        imdb_id: row.imdb_id,
+        trakt_id: row.trakt_id,
+        trakt_slug: row.trakt_slug,
+        plot: row.plot,
+        genres: row.genres,
+        poster_url: row.poster_url,
+        _strategy: "lexical",
+        _title_matches_query: true,
+      });
     }
 
-    // 4) Rescore / sort – boost any title whose name contains the query
     const qLower = query.toLowerCase();
     const rescored = enriched.map((it) => {
-      let boost = 0;
-      if (it.title && it.title.toLowerCase().includes(qLower)) {
-        boost += 1.0; // make "Ice Age ..." bubble to the top
-      }
+      const titleMatchesQuery =
+        it._title_matches_query ||
+        Boolean(it.title && it.title.toLowerCase().includes(qLower));
+      const boost = titleMatchesQuery ? 1 : 0;
       const baseScore = typeof it.score === "number" ? it.score : 0;
-      return { ...it, _rank_score: baseScore + boost };
+      return {
+        ...it,
+        _title_matches_query: titleMatchesQuery,
+        _rank_score: baseScore + boost,
+      };
     });
 
-    rescored.sort(
-      (a, b) => (b._rank_score ?? 0) - (a._rank_score ?? 0)
-    );
+    rescored.sort((a, b) => (b._rank_score ?? 0) - (a._rank_score ?? 0));
+    const finalItems = rescored.map(({ _rank_score, ...rest }) => rest);
+    const uniqueItems = dedupeByTitleId(finalItems).slice(0, topK);
 
-    // 5) Return without the internal _rank_score
     return res.json({
       ok: true,
-      items: rescored.map(({ _rank_score, ...rest }) => rest),
+      items: withRecommendationReason(uniqueItems, {
+        query,
+        strategy: "semantic",
+      }),
     });
   } catch (err) {
     console.error("semantic proxy+enrich error:", err);
@@ -365,205 +316,166 @@ router.get("/semantic", async (req, res) => {
   }
 });
 
-// GET /api/recs/content?seed_text=...&topK=5
 router.get("/content", async (req, res) => {
   try {
-    const seed_text = (req.query.seed_text || req.query.seed || "")
-      .toString()
-      .trim();
+    const seedText = (req.query.seed_text || req.query.seed || "").toString().trim();
     const topK = Number(req.query.topK || 5);
 
-    if (!seed_text) {
+    if (!seedText) {
       return res.status(400).json({
         ok: false,
         error: "seed_text query parameter is required",
       });
     }
 
-    // 1) call recommender
     const r = await fetch(`${RECS_URL}/recs/content`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ seed_text, topK }),
+      body: JSON.stringify({ seed_text: seedText, topK }),
     });
     const base = await r.json();
     if (!r.ok) return res.status(r.status).json(base);
 
     const items = toArray(base);
-
-    // 2) enrich each item from DB (same style as /semantic)
+    const seedNorm = seedText.toLowerCase().trim();
     const enriched = [];
     for (const it of items) {
-      const titleId = it.title_id || it.id || null;
-      const titleName = (it.title || it.name || "").toString();
-
-      let row = null;
-
-      if (titleId) {
-        const q = await pool.query(
-          `SELECT id, name, year, imdb_id, trakt_id, trakt_slug, poster_url, plot, genres 
-           FROM titles WHERE id = $1 LIMIT 1`,
-          [titleId]
-        );
-        row = q.rows[0] || null;
-      }
-
-      if (!row && titleName) {
-        const q = await pool.query(
-          `SELECT id, name, year, imdb_id, trakt_id, trakt_slug, poster_url, plot, genres 
-           FROM titles WHERE lower(name) = lower($1)
-           ORDER BY popularity DESC NULLS LAST
-           LIMIT 1`,
-          [titleName]
-        );
-        row = q.rows[0] || null;
-      }
-
-      let poster_url = row?.poster_url || null;
-      if (!poster_url && row?.imdb_id) {
-        poster_url = await omdbPoster(row.imdb_id);
-      }
-
+      const candidate = await enrichCandidate(it);
+      const titleNorm = String(candidate.title || "").toLowerCase().trim();
+      if (titleNorm && seedNorm && titleNorm === seedNorm) continue;
       enriched.push({
-        title_id: titleId || row?.id || null,
-        title: titleName || row?.name || null,
-        score:
-          typeof it.score === "number" ? it.score : it.similarity ?? null,
-        year: row?.year ?? null,
-        imdb_id: row?.imdb_id ?? null,
-        trakt_id: row?.trakt_id ?? null,
-        trakt_slug: row?.trakt_slug ?? null,
-        plot: row?.plot ?? null,
-        genres: row?.genres ?? null,
-        poster_url: poster_url || null,
+        ...candidate,
+        _strategy: "content",
+        _seed_text: seedText,
       });
     }
 
-    return res.json({ ok: true, items: enriched });
+    const uniqueItems = dedupeByTitleId(enriched).slice(0, topK);
+
+    return res.json({
+      ok: true,
+      items: withRecommendationReason(uniqueItems, {
+        strategy: "content",
+        seedText,
+      }),
+    });
   } catch (err) {
     console.error("content proxy+enrich error:", err);
     return res.status(500).json({ ok: false, error: "proxy_failed" });
   }
 });
 
-// GET /api/recs/cf  (hybrid CF + semantic fallback, global)
 router.get("/cf", async (req, res) => {
   try {
-    const TARGET = Number(req.query.topK || 10);
-
-    // 1) Try CF from DB (popular_titles)
+    const target = Number(req.query.topK || 10);
     let cfItems = [];
+
     try {
-      // ask for a bit more so we can slice later
-      cfItems = await getCfRecs(TARGET * 2);
+      cfItems = (await getCfRecs(target * 2)).map((it) => ({
+        ...it,
+        _strategy: "cf_global",
+      }));
     } catch (e) {
       console.error("CF (DB) failed, will fallback to semantic:", e);
     }
 
-    // 2) If CF is good enough, just return it
-    if (cfItems && cfItems.length >= 5) {
-      return res.json({ ok: true, items: cfItems.slice(0, TARGET) });
+    if (cfItems.length >= 5) {
+      return res.json({
+        ok: true,
+        items: withRecommendationReason(cfItems.slice(0, target), {
+          strategy: "cf_global",
+        }),
+      });
     }
-      // else fall through to fallback logic
-    
 
-    // 3) Otherwise, build seeds (from popular_titles)
     const seeds = await pickSeeds(5);
-
-    // 4) Semantic fallback using those seeds
-    const semanticItems = await getSemanticFallbackFromSeeds(
-      seeds,
-      TARGET
-    );
-
-
-    // Merge + semantic
-    const mergedRaw = [
-      ...(cfItems || []),
-      ...(semanticItems || []), 
-    ];
-
-    const merged = dedupeByTitleId(mergedRaw);
-
+    const semanticItems = await getSemanticFallbackFromSeeds(seeds, target);
+    const merged = dedupeByTitleId([...(cfItems || []), ...(semanticItems || [])]);
 
     return res.json({
       ok: true,
-      items: merged.slice(0, TARGET),
+      items: withRecommendationReason(merged.slice(0, target), {
+        strategy: "cf_global",
+      }),
     });
   } catch (err) {
     console.error("cf (hybrid) route error:", err);
-    res.status(500).json({ ok: false, error: "cf_failed" });
+    return res.status(500).json({ ok: false, error: "cf_failed" });
   }
 });
 
-// GET /api/recs/cf_user  (personalized popular recs + semantic fallback)
 router.get("/cf_user", authRequired, async (req, res) => {
   try {
-    const userId = req.user.id; // set by auth middleware
-    const TARGET = Number(req.query.topK || 20);
+    const userId = req.user.id;
+    const target = Number(req.query.topK || 20);
+
     const { rows: wlrows } = await pool.query(
       "SELECT title_id FROM wishlists WHERE user_id = $1 ORDER BY ts DESC LIMIT 3",
       [userId]
     );
     const wishlistIds = (wlrows || []).map((r) => r.title_id);
     const wishlistSet = new Set(wishlistIds);
-    // 1) CF-style: popular but excluding wishlist
+
     let cfItems = [];
     try {
       const q = await pool.query(
         `
         SELECT
-          t.id   AS title_id,
+          t.id AS title_id,
           t.name AS title,
           t.year,
           t.poster_url,
           p.cnt::float AS score
         FROM public.popular_titles p
-        JOIN titles t
-          ON t.id = p.title_id
+        JOIN titles t ON t.id = p.title_id
         LEFT JOIN wishlists w
           ON w.user_id = $1
          AND w.title_id = t.id
-        WHERE w.title_id IS NULL          -- not already in the user's wishlist
+        WHERE w.title_id IS NULL
         ORDER BY p.cnt DESC
         LIMIT $2
         `,
-        [userId, TARGET * 2]
+        [userId, target * 2]
       );
-      cfItems = q.rows || [];
+      cfItems = (q.rows || []).map((it) => ({ ...it, _strategy: "cf_user" }));
     } catch (e) {
       console.error("cf_user CF query failed:", e);
     }
 
-    // 2) If CF is good enough, just return it
-    if (wishlistIds.length === 0){  
-      if (cfItems && cfItems.length >= 5) {
-        return res.json({ ok: true, items: cfItems.slice(0, TARGET) });
-      }
-
+    if (wishlistIds.length === 0 && cfItems.length >= 5) {
+      return res.json({
+        ok: true,
+        items: withRecommendationReason(cfItems.slice(0, target), {
+          strategy: "cf_user",
+        }),
+      });
     }
 
-    // 3) Otherwise, pick seeds for this user (wishlist → popular_titles)
-    const seedIds = wishlistIds.length > 0 ? wishlistIds : await pickSeedsForUser(userId);
+    const seedIds =
+      wishlistIds.length > 0 ? wishlistIds : await pickSeedsForUser(userId);
+    let seedTitle = "";
+    if (seedIds.length > 0) {
+      const q = await pool.query("SELECT name FROM titles WHERE id = $1 LIMIT 1", [
+        seedIds[0],
+      ]);
+      seedTitle = (q.rows?.[0]?.name || "").toString();
+    }
 
+    const semanticItems = await getSemanticFallback(seedIds, target);
+    const semanticFiltered = (semanticItems || [])
+      .filter((it) => {
+        const id = it.title_id || it.id;
+        return id && !wishlistSet.has(id);
+      })
+      .map((it) => ({
+        ...it,
+        _strategy: "semantic_fallback_seed",
+        _seed_text: seedTitle,
+      }));
 
-    // 4) Semantic fallback using those seed IDs (via /recs/by_seed)
-    const semanticItems = await getSemanticFallback(seedIds, TARGET);
-    const semanticFiltered = (semanticItems || []).filter(it => {
-      const id = it.title_id || it.id;
-      return id && !wishlistSet.has(id);
-    });
+    const merged = dedupeByTitleId([...(cfItems || []), ...(semanticFiltered || [])]);
 
-    const mergedRaw = [
-      ...(cfItems || []),
-      ...(semanticFiltered || []),
-    ];  
-
-    const merged = dedupeByTitleId(mergedRaw);
-
-    
-
-    if (merged.length < TARGET) {
+    if (merged.length < target) {
       const q = await pool.query(
         `
         SELECT
@@ -576,13 +488,25 @@ router.get("/cf_user", authRequired, async (req, res) => {
         ORDER BY popularity DESC NULLS LAST, id ASC
         LIMIT $1
         `,
-        [TARGET]
+        [target]
       );
+      const fallback = (q.rows || []).map((it) => ({
+        ...it,
+        _strategy: "catalog_fallback",
+      }));
 
-      return res.json({ ok: true, items: q.rows });
+      return res.json({
+        ok: true,
+        items: withRecommendationReason(fallback, { strategy: "catalog_fallback" }),
+      });
     }
 
-    return res.json({ ok: true, items: merged.slice(0, TARGET) });
+    return res.json({
+      ok: true,
+      items: withRecommendationReason(merged.slice(0, target), {
+        strategy: "cf_user",
+      }),
+    });
   } catch (err) {
     console.error("cf_user route error:", err);
     return res.status(500).json({ ok: false, error: "cf_user_failed" });

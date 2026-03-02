@@ -12,7 +12,6 @@ spec:
     metadata:
       labels:
         app: backend
-      # ✅ ADDED (optional): Prometheus scrape annotations
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8000"
@@ -23,11 +22,8 @@ spec:
           image: moviemix-backend:latest
           imagePullPolicy: IfNotPresent
           env:
-            # ---- Service endpoints ----
             - name: RECS_URL
               value: http://recommender:8001
-
-            # ---- DB connection (explicit) ----
             - name: POSTGRES_HOST
               value: db
             - name: POSTGRES_PORT
@@ -47,19 +43,16 @@ spec:
                 secretKeyRef:
                   name: moviemix-secrets
                   key: POSTGRES_DB
-
-            # Many Node backends use DATABASE_URL; include it too
             - name: DATABASE_URL
-              value: postgresql://admin:I4mGr00t@db:5432/moviemix
-
-            # ✅ ADDED: JWT secret (requested)
+              valueFrom:
+                secretKeyRef:
+                  name: moviemix-secrets
+                  key: DATABASE_URL
             - name: JWT_SECRET
               valueFrom:
                 secretKeyRef:
                   name: backend-secrets
                   key: jwt_secret
-
-            # ✅ Trakt import wiring
             - name: ENABLE_TRAKT_IMPORT
               value: "1"
             - name: TRAKT_ACCESS_TOKEN
@@ -67,8 +60,13 @@ spec:
                 secretKeyRef:
                   name: moviemix-secrets
                   key: TRAKT_ACCESS_TOKEN
-
-            # ---- External API keys ----
+                  optional: true
+            - name: TRAKT_REFRESH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: moviemix-secrets
+                  key: TRAKT_REFRESH_TOKEN
+                  optional: true
             - name: OMDB_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -91,6 +89,29 @@ spec:
                   key: TRAKT_REDIRECT_URI
           ports:
             - containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
 ---
 apiVersion: v1
 kind: Service
@@ -101,7 +122,6 @@ spec:
   selector:
     app: backend
   ports:
-    # ✅ ADDED: name for the service port (nice-to-have)
     - name: http
       port: 8000
       targetPort: 8000

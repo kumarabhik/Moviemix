@@ -20,15 +20,22 @@ function authHeaders() {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+async function parseJson(res) {
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = data?.error || `${res.status}`;
+    throw new Error(msg);
+  }
+  return data;
+}
+
 export async function importFromTrakt() {
   const r = await fetch("/api/integrations/trakt/import", {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
     cache: "no-store",
   });
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data?.error || `import failed: ${r.status}`);
-  return data;
+  return parseJson(r);
 }
 
 
@@ -53,8 +60,7 @@ export async function getSemantic(query, topK = 5) {
     cache: "no-store",
     headers: { "Cache-Control": "no-store" },
   });
-  if (!r.ok) throw new Error(`semantic failed: ${r.status}`);
-  return r.json();
+  return parseJson(r);
 }
 
 export async function getTitles() {
@@ -63,8 +69,7 @@ export async function getTitles() {
     cache: "no-store",
     headers: { "Cache-Control": "no-store" },
   });
-  if (!r.ok) throw new Error(`titles failed: ${r.status}`);
-  return r.json();
+  return parseJson(r);
 }
 
 // ---- Wishlist (requires auth) ----
@@ -73,11 +78,7 @@ export async function addToWishlist(titleId) {
     method: "POST",
     headers: { ...authHeaders() },
   });
-  if (!res.ok) {
-    if (res.status === 401) throw new Error("unauthorized");
-    throw new Error("wishlist add failed");
-  }
-  return res.json();
+  return parseJson(res);
 }
 
 export async function removeFromWishlist(titleId) {
@@ -85,32 +86,22 @@ export async function removeFromWishlist(titleId) {
     method: "DELETE",
     headers: { ...authHeaders() },
   });
-  if (!res.ok) {
-    if (res.status === 401) throw new Error("unauthorized");
-    throw new Error("wishlist remove failed");
-  }
-  return res.json();
+  return parseJson(res);
 }
 
 export async function getWishlist() {
-  const token = getToken();
-  const headers = token ? { Authorization: `Bearer ${token}` } : {};
-
   const res = await fetch(`/api/wishlist`, {
     method: "GET",
-    headers,
+    headers: { ...authHeaders() },
     cache: "no-store",
   });
-
-  if (!res.ok) throw new Error("wishlist fetch failed");
-  return res.json();
+  return parseJson(res);
 }
 
 // ---- Titles ----
 export async function getTitleById(id) {
   const res = await fetch(`/api/title/${id}`, { cache: "no-store" });
-  if (!res.ok) throw new Error("title fetch failed");
-  return res.json();
+  return parseJson(res);
 }
 
 export async function getWatchLinks(id) {
@@ -119,14 +110,23 @@ export async function getWatchLinks(id) {
 
   try {
     const r = await fetch(url, { cache: "no-store" });
-    if (!r.ok) {
-      console.log("watch-links HTTP", r.status);
-      return null;
-    }
-    return r.json();
+    if (!r.ok) return null;
+    return parseJson(r);
   } catch (e) {
-    console.log("watch-links fetch failed", e);
     return null;
   }
+}
+
+export async function getAbSummary(days = 14, scope = "all") {
+  const params = new URLSearchParams({
+    days: String(days),
+    scope,
+  });
+  const res = await fetch(`/api/events/ab_summary?${params.toString()}`, {
+    method: "GET",
+    headers: { ...authHeaders() },
+    cache: "no-store",
+  });
+  return parseJson(res);
 }
 

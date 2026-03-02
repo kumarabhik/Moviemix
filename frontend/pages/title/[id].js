@@ -1,13 +1,46 @@
-// frontend/pages/title/[id].js
 import { useRouter } from "next/router";
 import { useEffect, useState } from "react";
+
 import MovieCard from "../../components/MovieCard";
 import {
-  getTitleById,
   getSimilarBySeedText,
+  getTitleById,
   getWatchLinks,
+  getWishlist,
   toArray,
 } from "../../lib/api";
+import { getToken, isLoggedIn } from "../../lib/session";
+
+function normalizeId(v) {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : String(v);
+}
+
+function dedupeItems(items) {
+  const seen = new Set();
+  const out = [];
+  for (const it of items || []) {
+    const imdb = String(it?.imdb_id || "").trim().toLowerCase();
+    const trakt = String(it?.trakt_id || "").trim().toLowerCase();
+    const title = String(it?.title || it?.name || "")
+      .trim()
+      .toLowerCase();
+    const year = String(it?.year || "").trim();
+    const id = String(it?.title_id ?? it?.id ?? "").trim();
+    const keys = [];
+    if (imdb) keys.push(`imdb:${imdb}`);
+    if (trakt) keys.push(`trakt:${trakt}`);
+    if (title && year) keys.push(`title_year:${title}:${year}`);
+    if (title) keys.push(`title:${title}`);
+    if (id) keys.push(`id:${id}`);
+    if (keys.length === 0) continue;
+    if (keys.some((k) => seen.has(k))) continue;
+    keys.forEach((k) => seen.add(k));
+    out.push(it);
+  }
+  return out;
+}
 
 export default function TitlePage() {
   const router = useRouter();
@@ -16,30 +49,40 @@ export default function TitlePage() {
   const [item, setItem] = useState(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
-
   const [similar, setSimilar] = useState([]);
   const [simErr, setSimErr] = useState("");
-
   const [watchLinks, setWatchLinks] = useState(null);
+  const [savedIds, setSavedIds] = useState(new Set());
 
-// Load title + watch links
+  async function loadSavedIds() {
+    if (!isLoggedIn()) {
+      setSavedIds(new Set());
+      return;
+    }
+    try {
+      const w = await getWishlist();
+      const ids = new Set(
+        toArray(w)
+          .map((it) => normalizeId(it.title_id ?? it.id))
+          .filter((v) => v !== null)
+      );
+      setSavedIds(ids);
+    } catch {
+      setSavedIds(new Set());
+    }
+  }
+
   useEffect(() => {
-    if (!router.isReady) return;
-    if (!id) return;
-
+    if (!router.isReady || !id) return;
     (async () => {
       try {
         setErr("");
         setLoading(true);
-
         const t = await getTitleById(id);
         setItem(t.item);
-
-        // ✅ always try; backend is the gate
-        try {
-          const w = await getWatchLinks(id);
-          if (w?.ok) setWatchLinks(w.links);
-        } catch (_) {}
+        await loadSavedIds();
+        const w = await getWatchLinks(id);
+        if (w?.ok) setWatchLinks(w.links);
       } catch (e) {
         console.error(e);
         setErr("Failed to load title");
@@ -49,21 +92,21 @@ export default function TitlePage() {
     })();
   }, [router.isReady, id]);
 
+  useEffect(() => {
+    const onFocus = () => loadSavedIds();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
 
-  // Load similar titles
   useEffect(() => {
     if (!item) return;
-
     (async () => {
       try {
         setSimErr("");
         const seedText = item.title || item.name || "";
-        if (!seedText) {
-          setSimilar([]);
-          return;
-        }
-        const res = await getSimilarBySeedText(seedText, 5);
-        setSimilar(toArray(res));
+        if (!seedText) return setSimilar([]);
+        const res = await getSimilarBySeedText(seedText, 8);
+        setSimilar(dedupeItems(toArray(res)));
       } catch (e) {
         console.error(e);
         setSimErr("Failed to load similar titles");
@@ -71,10 +114,9 @@ export default function TitlePage() {
     })();
   }, [item]);
 
-  // Interaction tracking
   useEffect(() => {
     if (!item) return;
-    const token = localStorage.getItem("moviemix_token") || "";
+    const token = getToken();
     fetch("/api/interactions", {
       method: "POST",
       headers: {
@@ -95,22 +137,40 @@ export default function TitlePage() {
       <button
         onClick={() => router.back()}
         className="text-sm opacity-70 hover:opacity-100"
+        type="button"
       >
-        ← Back
+        Back
       </button>
 
-      {loading && <div>Loading…</div>}
+      {loading && <div>Loading...</div>}
       {err && <div className="text-red-600 text-sm">{err}</div>}
 
       {item && (
         <>
-          <MovieCard item={item} />
+          <MovieCard
+            item={item}
+            initialSaved={savedIds.has(normalizeId(item.title_id ?? item.id))}
+            onAdded={(idVal) =>
+              setSavedIds((prev) => {
+                const next = new Set(prev);
+                const idNorm = normalizeId(idVal);
+                if (idNorm !== null) next.add(idNorm);
+                return next;
+              })
+            }
+            onRemoved={(idVal) =>
+              setSavedIds((prev) => {
+                const next = new Set(prev);
+                const idNorm = normalizeId(idVal);
+                if (idNorm !== null) next.delete(idNorm);
+                return next;
+              })
+            }
+          />
 
-          {/* ✅ FINAL — Clickable Watch Links */}
           {watchLinks && (
-            <div className="mt-4 p-3 rounded-lg border border-white/10 bg-white/5">
+            <div className="mt-4 p-3 rounded-xl border border-white/20 bg-white/40 dark:bg-slate-900/40">
               <div className="font-semibold mb-2">Where to watch</div>
-
               <div className="flex flex-wrap gap-3">
                 <a
                   href={watchLinks.netflix}
@@ -120,7 +180,6 @@ export default function TitlePage() {
                 >
                   Netflix
                 </a>
-
                 <a
                   href={watchLinks.prime}
                   target="_blank"
@@ -129,20 +188,11 @@ export default function TitlePage() {
                 >
                   Prime Video
                 </a>
-                {/* <a
-                  href={watchLinks.disney}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="px-3 py-2 rounded bg-indigo-500/10 text-indigo-600 hover:bg-indigo-500/20 text-sm font-medium"
-                >
-                  Disney+
-                </a> */}
-
                 <a
                   href={watchLinks.google}
                   target="_blank"
                   rel="noreferrer"
-                  className="px-3 py-2 rounded bg-gray-500/10 hover:bg-gray-500/20 text-sm font-medium"
+                  className="px-3 py-2 rounded bg-slate-500/10 hover:bg-slate-500/20 text-sm font-medium"
                 >
                   Search Google
                 </a>
@@ -150,21 +200,35 @@ export default function TitlePage() {
             </div>
           )}
 
-          {/* More like this */}
           <div className="mt-6">
             <h2 className="text-xl font-semibold mb-2">More like this</h2>
-
-            {simErr && (
-              <div className="text-red-600 text-sm mb-2">{simErr}</div>
-            )}
-
+            {simErr && <div className="text-red-600 text-sm mb-2">{simErr}</div>}
             {similar.length === 0 && !simErr && (
               <div className="text-sm opacity-70">No similar titles yet.</div>
             )}
-
             <div className="grid gap-3">
               {similar.map((s, i) => (
-                <MovieCard key={s.title_id ?? s.id ?? i} item={s} />
+                <MovieCard
+                  key={s.title_id ?? s.id ?? i}
+                  item={s}
+                  initialSaved={savedIds.has(normalizeId(s.title_id ?? s.id))}
+                  onAdded={(idVal) =>
+                    setSavedIds((prev) => {
+                      const next = new Set(prev);
+                      const idNorm = normalizeId(idVal);
+                      if (idNorm !== null) next.add(idNorm);
+                      return next;
+                    })
+                  }
+                  onRemoved={(idVal) =>
+                    setSavedIds((prev) => {
+                      const next = new Set(prev);
+                      const idNorm = normalizeId(idVal);
+                      if (idNorm !== null) next.delete(idNorm);
+                      return next;
+                    })
+                  }
+                />
               ))}
             </div>
           </div>

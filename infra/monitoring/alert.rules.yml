@@ -1,4 +1,4 @@
-﻿groups:
+groups:
   - name: moviemix_alerts
     rules:
       - alert: BackendDown
@@ -16,3 +16,28 @@
           severity: critical
         annotations:
           summary: "MovieMix recommender is down"
+
+      - alert: BackendHigh5xxRate
+        expr: |
+          (
+            sum(rate(http_requests_total{job="backend",status=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(http_requests_total{job="backend"}[5m])), 1)
+          ) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MovieMix backend 5xx rate is above 5%"
+
+      - alert: BackendP99LatencyHigh
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (le) (rate(http_request_duration_ms_bucket{job="backend"}[5m]))
+          ) > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MovieMix backend p99 latency is above 1s"

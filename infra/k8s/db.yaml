@@ -18,11 +18,20 @@ spec:
           image: postgres:16
           env:
             - name: POSTGRES_USER
-              value: admin
+              valueFrom:
+                secretKeyRef:
+                  name: moviemix-secrets
+                  key: POSTGRES_USER
             - name: POSTGRES_PASSWORD
-              value: I4mGr00t
+              valueFrom:
+                secretKeyRef:
+                  name: moviemix-secrets
+                  key: POSTGRES_PASSWORD
             - name: POSTGRES_DB
-              value: moviemix
+              valueFrom:
+                secretKeyRef:
+                  name: moviemix-secrets
+                  key: POSTGRES_DB
           ports:
             - containerPort: 5432
           volumeMounts:
@@ -54,3 +63,4 @@ spec:
     app: db
   ports:
     - port: 5432
+
