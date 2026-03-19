@@ -6,6 +6,7 @@ It combines semantic retrieval, collaborative popularity signals, and optional X
 ## What Is Improved
 
 - Explainable recommendations: every recommendation item now includes `reason` and `reason_code`.
+- Personalized hybrid ranking: semantic candidates, user-user CF candidates, XGBoost reranking, and diversity/novelty post-processing.
 - Real A/B analytics: experiment summary endpoint and dashboard page (`/experiment`) with CTR/winner.
 - Security hardening: required env-driven secrets (`DATABASE_URL`, `JWT_SECRET`, `AUTH_TOKEN`) and cleaned `.env.example`.
 - Quality gates: backend tests plus CI pipeline across backend, frontend smoke build, and Python syntax checks.
@@ -44,7 +45,7 @@ Backend (Express :8000)
 Recommender
   -> SentenceTransformer embeddings
   -> FAISS semantic search
-  -> Optional XGBoost reranking
+  -> XGBoost reranking
 Airflow
   -> /admin/build_embeddings
   -> REFRESH MATERIALIZED VIEW popular_titles
@@ -192,18 +193,37 @@ $env:BACKEND_URL = "http://localhost:8000"
 python scripts/build_xgb_dataset.py
 ```
 
+This now builds training rows from your interaction history, wishlist signals, semantic candidates, global popular candidates, and user-user CF candidates.
+
+Useful optional envs:
+
+```powershell
+$env:USER_EMAIL_LIKE = "synthetic.%@synthetic.moviemix.local"
+$env:MAX_CUTOFFS_PER_USER = "8"
+$env:TOPK = "50"
+$env:MAX_FUTURE_POSITIVES = "3"
+$env:MAX_NEGATIVES_PER_QUERY = "80"
+```
+
 2. Train model.
 
 ```powershell
 python scripts/train_xgb_reranker.py
 ```
 
-3. Copy model and rebuild recommender.
+3. Reload the recommender model.
 
 ```powershell
-Copy-Item .\models\xgb_reranker.json .\recommender\xgb_reranker.json -Force
-docker compose --env-file .env -f .\infra\docker-compose.yaml up -d --build recommender
+Invoke-RestMethod "http://localhost:8001/admin/reload_xgb" -Method Post
 ```
+
+The current personalized pipeline for `/api/recs/cf_user` is:
+
+1. Build a user profile from wishlist, watched titles, ratings, and interaction weights.
+2. Retrieve candidates from popular titles, semantic seed expansion, and user-user collaborative filtering.
+3. Enrich candidates with ranking features such as semantic score, popularity, genre overlap, novelty, wishlist state, and user-user support.
+4. Rerank candidates with XGBoost, or use a heuristic fallback for wishlist-only cold-start users.
+5. Apply a final diversity/novelty/duplicate-control pass before returning the feed.
 
 ## Offline Evaluation
 
@@ -224,6 +244,29 @@ $env:BACKEND_URL="http://localhost:8000"
 $env:AUTH_TOKEN="<bearer-token>"
 python scripts/eval_offline.py
 ```
+
+Optional evaluation envs:
+
+```powershell
+$env:EVAL_EMAIL="synthetic.action.01@synthetic.moviemix.local"
+$env:EVAL_PASSWORD="SyntheticPass123!"
+$env:HOLDOUT_COUNT="3"
+$env:METRIC_KS="10,20,50,100"
+$env:TOPK="100"
+```
+
+The evaluator performs true holdout testing by temporarily hiding the chosen holdout titles from both `wishlists` and `interactions`, requesting `/api/recs/cf_user`, and then restoring the hidden rows.
+
+## Synthetic User Seeding
+
+To generate clustered synthetic users for collaborative-filtering and reranker experiments:
+
+```powershell
+$env:DATABASE_URL="postgresql://..."
+python scripts/seed_synthetic_users.py
+```
+
+This script creates `100` synthetic users across four taste groups (`action`, `drama`, `comedy`, `spooky`) with wishlist rows, watched/rated interactions, and group-shared favorites to make offline evaluation more realistic.
 
 ## Testing and CI
 
@@ -261,6 +304,7 @@ CI workflow (`.github/workflows/ci.yml`) runs:
 - `GET /api/wishlist` (Bearer token required)
 - `POST /api/integrations/trakt/import` (Bearer token required + feature flag)
 - `POST /admin/build_embeddings` (recommender)
+- `POST /admin/reload_xgb` (recommender)
 
 ## Monitoring (Optional)
 

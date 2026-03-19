@@ -48,7 +48,7 @@ router.post("/rebuild_signals", async (req, res) => {
         const val = m.rating ?? m.value ?? null;
         if (val !== null && val !== undefined && val !== "") {
           const num = Number(val);
-          if (!Number.isNaN(num)) rating = num;
+          if (!Number.isNaN(num) && num >= 1 && num <= 5) rating = num;
         }
       }
 

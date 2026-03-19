@@ -1,9 +1,11 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
+import ast
 import numpy as np
 import time
 import os
+import re
 import pandas as pd
 import psycopg2
 import faiss
@@ -25,6 +27,7 @@ EMB_FILE = os.path.join(DATA_DIR, "embeddings.npy")
 ID_FILE = os.path.join(DATA_DIR, "title_ids.npy")
 META_CSV = os.path.join(DATA_DIR, "titles_meta.csv")
 INDEX_FP = os.path.join(DATA_DIR, "faiss.index")
+XGB_MODEL_PATH = os.getenv("XGB_MODEL_PATH", os.path.join(DATA_DIR, "xgb_reranker.json"))
 
 MODEL_NAME = os.getenv("EMB_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 
@@ -58,6 +61,11 @@ class RecItem(BaseModel):
     score: float
 
 
+class XgbRerankReq(BaseModel):
+    candidates: List[Dict[str, Any]]
+    topK: Optional[int] = None
+
+
 # ---------------------------
 # In-memory handles
 # ---------------------------
@@ -65,6 +73,8 @@ _model: Optional[SentenceTransformer] = None
 _index: Optional[faiss.Index] = None
 _title_ids: Optional[np.ndarray] = None
 _meta: Optional[pd.DataFrame] = None
+_embeddings: Optional[np.ndarray] = None
+_id_to_idx: Dict[int, int] = {}
 
 # ---------------------------
 # XGBoost model + feature builder
@@ -78,11 +88,175 @@ FEATURE_COLUMNS = [
     "genre_overlap_seed",
     "genre_overlap_user",
     "in_user_wishlist",
+    "user_user_cf",
+    "user_user_supporters",
+    "source_semantic",
+    "source_popular",
+    "source_neighbor",
+    "seen_by_user",
+    "novelty_score",
 ]
 
 
 def _normalize_title(value: str) -> str:
-    return " ".join(str(value or "").lower().split())
+    cleaned = re.sub(r"[^a-z0-9]+", " ", str(value or "").lower())
+    return " ".join(cleaned.split())
+
+
+def _safe_list(value) -> List[str]:
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if isinstance(value, tuple):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if isinstance(value, np.ndarray):
+        return [str(v).strip() for v in value.tolist() if str(v).strip()]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            parsed = ast.literal_eval(text)
+            if isinstance(parsed, (list, tuple)):
+                return [str(v).strip() for v in parsed if str(v).strip()]
+        except Exception:
+            pass
+        return [text]
+    return []
+
+
+def _build_search_text(name: str, plot: str, genres=None, cast_names=None, year=None) -> str:
+    title = str(name or "").strip()
+    overview = str(plot or "").strip()
+    genres_list = _safe_list(genres)
+    cast_list = _safe_list(cast_names)[:6]
+    year_val = str(int(year)) if str(year or "").strip() else ""
+
+    parts = []
+    if title:
+        # Repeat the title in a few natural contexts so title queries map
+        # closer to the actual item embedding.
+        parts.extend(
+            [
+                f"Title: {title}.",
+                f"Movie: {title}.",
+                f"{title}.",
+            ]
+        )
+    if year_val:
+        parts.append(f"Release year: {year_val}.")
+    if genres_list:
+        genre_text = ", ".join(genres_list)
+        parts.extend(
+            [
+                f"Genres: {genre_text}.",
+                f"This is a {genre_text} story.",
+            ]
+        )
+    if cast_list:
+        parts.append(f"Cast: {', '.join(cast_list)}.")
+    if overview:
+        parts.append(f"Overview: {overview}")
+
+    return " ".join(p for p in parts if p)
+
+
+def _ensure_meta_shape(meta: pd.DataFrame) -> pd.DataFrame:
+    df = meta.copy()
+    for col, default in {
+        "id": None,
+        "name": "",
+        "text": "",
+        "genres": "",
+        "cast_names": "",
+        "year": "",
+    }.items():
+        if col not in df.columns:
+            df[col] = default
+
+    df["name"] = df["name"].fillna("").astype(str)
+    df["text"] = df["text"].fillna("").astype(str)
+    df["genres"] = df["genres"].apply(_safe_list)
+    df["cast_names"] = df["cast_names"].apply(_safe_list)
+    df["title_norm"] = df["name"].apply(_normalize_title)
+    return df
+
+
+def _refresh_lookup_state():
+    global _id_to_idx, _meta
+    if _title_ids is None:
+        _id_to_idx = {}
+        return
+    _id_to_idx = {int(title_id): idx for idx, title_id in enumerate(_title_ids.tolist())}
+    if _meta is not None:
+        _meta = _ensure_meta_shape(_meta)
+
+
+def _row_for_title_id(title_id: int) -> Optional[pd.Series]:
+    if _meta is None or "id" not in _meta.columns:
+        return None
+    idx = _id_to_idx.get(int(title_id))
+    if idx is not None and 0 <= idx < len(_meta):
+        return _meta.iloc[idx]
+    rows = _meta.loc[_meta["id"] == int(title_id)]
+    if rows.empty:
+        return None
+    return rows.iloc[0]
+
+
+def _title_match_score(query_norm: str, title_norm: str) -> float:
+    if not query_norm or not title_norm:
+        return 0.0
+    if query_norm == title_norm:
+        return 1.0
+    if title_norm.startswith(query_norm) or query_norm.startswith(title_norm):
+        return 0.82
+    if query_norm in title_norm or title_norm in query_norm:
+        return 0.68
+
+    q_tokens = set(query_norm.split())
+    t_tokens = set(title_norm.split())
+    if not q_tokens or not t_tokens:
+        return 0.0
+    overlap = len(q_tokens & t_tokens)
+    if overlap == 0:
+        return 0.0
+    return overlap / len(q_tokens | t_tokens)
+
+
+def _find_anchor_indices(query_norm: str, max_matches: int = 5) -> List[int]:
+    if not query_norm or _meta is None or "title_norm" not in _meta.columns:
+        return []
+
+    exact_rows = _meta[_meta["title_norm"] == query_norm]
+    if not exact_rows.empty:
+        return [idx for idx in exact_rows.index.tolist()[:max_matches]]
+
+    contains_rows = _meta[_meta["title_norm"].str.contains(query_norm, regex=False, na=False)]
+    if not contains_rows.empty:
+        return [idx for idx in contains_rows.index.tolist()[:max_matches]]
+
+    q_tokens = set(query_norm.split())
+    if not q_tokens:
+        return []
+
+    scored = []
+    for idx, title_norm in _meta["title_norm"].items():
+        score = _title_match_score(query_norm, title_norm)
+        if score >= 0.5:
+            scored.append((score, idx))
+    scored.sort(reverse=True)
+    return [idx for _, idx in scored[:max_matches]]
+
+
+def _search_with_query_vectors(query_vectors: List[np.ndarray], weights: List[float], candidate_pool: int):
+    combined = {}
+    for vec, weight in zip(query_vectors, weights):
+        D, I = _index.search(vec, candidate_pool)
+        for idx, score in zip(I[0], D[0]):
+            if idx < 0:
+                continue
+            combined[idx] = combined.get(idx, 0.0) + float(weight) * float(score)
+    return combined
 
 
 def _dedupe_items_by_title(items):
@@ -101,16 +275,24 @@ def _dedupe_items_by_title(items):
 
 def _load_xgb_model():
     """
-    Load XGBoost reranker model from the same folder as main.py
-    -> /app/xgb_reranker.json inside the container.
+    Load XGBoost reranker model from durable storage first, then fall back
+    to the legacy code-local path for older setups.
     """
     global XGB_MODEL
 
     here = os.path.dirname(os.path.abspath(__file__))  # /app
-    model_path = os.path.join(here, "xgb_reranker.json")  # /app/xgb_reranker.json
+    candidate_paths = [
+        XGB_MODEL_PATH,
+        os.path.join(here, "xgb_reranker.json"),
+    ]
+    model_path = next((p for p in candidate_paths if os.path.exists(p)), None)
 
-    if not os.path.exists(model_path):
-        print(f"[xgb] model not found at {model_path}, reranker disabled.")
+    if not model_path:
+        print(
+            "[xgb] model not found; checked: "
+            + ", ".join(candidate_paths)
+            + ". reranker disabled."
+        )
         XGB_MODEL = None
         return
 
@@ -128,27 +310,18 @@ def build_features_for_candidates(candidates):
     """
     candidates: list of dicts with at least `score` (semantic similarity).
     Returns a NumPy array shape [N, len(FEATURE_COLUMNS)].
-    For now we only use semantic_score and set other features to 0.
     """
     X = []
     for it in candidates:
-        sem = float(it.get("score") or 0.0)
-
-        # placeholders for now; wire real features later
-        log_pop = 0.0
-        same_year = 0.0
-        genre_seed = 0.0
-        genre_user = 0.0
-        in_wishlist = 0.0
-
-        feats = [
-            sem,
-            log_pop,
-            same_year,
-            genre_seed,
-            genre_user,
-            in_wishlist,
-        ]
+        feats = []
+        for col in FEATURE_COLUMNS:
+            raw = it.get(col)
+            if raw is None and col == "semantic_score":
+                raw = it.get("score")
+            try:
+                feats.append(float(raw or 0.0))
+            except Exception:
+                feats.append(0.0)
         X.append(feats)
 
     if not X:
@@ -203,7 +376,7 @@ def _get_model() -> SentenceTransformer:
 
 def _load_index_if_exists() -> bool:
     """Load FAISS index and meta artifacts from disk if present."""
-    global _index, _title_ids, _meta
+    global _index, _title_ids, _meta, _embeddings
     if (
         os.path.exists(INDEX_FP)
         and os.path.exists(EMB_FILE)
@@ -212,12 +385,15 @@ def _load_index_if_exists() -> bool:
     ):
         try:
             _index = faiss.read_index(INDEX_FP)
+            _embeddings = np.load(EMB_FILE)
             _title_ids = np.load(ID_FILE)
-            _meta = pd.read_csv(META_CSV)
+            _meta = _ensure_meta_shape(pd.read_csv(META_CSV))
+            _refresh_lookup_state()
             return True
         except Exception:
             # reset on failure
             _index = None
+            _embeddings = None
             _title_ids = None
             _meta = None
     return False
@@ -246,8 +422,10 @@ def root():
             "/health",
             "/admin/build_embeddings",
             "/admin/reset",
+            "/admin/reload_xgb",
             "/recs/semantic",
             "/recs/content",
+            "/rerank/xgb",
         ],
         "ts": time.time(),
     }
@@ -274,6 +452,12 @@ def reset_artifacts():
     return {"ok": True}
 
 
+@app.post("/admin/reload_xgb")
+def reload_xgb():
+    _load_xgb_model()
+    return {"ok": True, "model_loaded": XGB_MODEL is not None}
+
+
 @app.post("/admin/build_embeddings")
 def build_embeddings(req: BuildReq):
     """
@@ -285,7 +469,11 @@ def build_embeddings(req: BuildReq):
     """
     # 1) Load data
     with _connect() as conn, conn.cursor() as cur:
-        sql = "SELECT id, name, plot FROM titles ORDER BY id ASC"
+        sql = """
+            SELECT id, name, plot, genres, cast_names, year
+            FROM titles
+            ORDER BY id ASC
+        """
         if req.limit and req.limit > 0:
             sql += f" LIMIT {int(req.limit)}"
         cur.execute(sql)
@@ -297,12 +485,19 @@ def build_embeddings(req: BuildReq):
     ids: List[int] = []
     texts: List[str] = []
     names: List[str] = []
+    genres_meta: List[List[str]] = []
+    cast_meta: List[List[str]] = []
+    years_meta: List[Optional[int]] = []
 
-    for _id, name, plot in rows:
+    for _id, name, plot, genres, cast_names, year in rows:
         ids.append(_id)
         names.append(name or "")
-        # prefer plot; fallback to name; finally id
-        text = (plot or "").strip() or name or str(_id)
+        genres_meta.append(_safe_list(genres))
+        cast_meta.append(_safe_list(cast_names))
+        years_meta.append(year)
+        text = _build_search_text(name or "", plot or "", genres, cast_names, year)
+        if not text.strip():
+            text = name or str(_id)
         texts.append(text)
 
     # 2) Encode
@@ -325,14 +520,36 @@ def build_embeddings(req: BuildReq):
     # 5) Persist artifacts
     np.save(EMB_FILE, emb)
     np.save(ID_FILE, np.array(ids, dtype=np.int32))
-    pd.DataFrame({"id": ids, "name": names, "text": texts}).to_csv(META_CSV, index=False)
+    pd.DataFrame(
+        {
+            "id": ids,
+            "name": names,
+            "text": texts,
+            "genres": genres_meta,
+            "cast_names": cast_meta,
+            "year": years_meta,
+        }
+    ).to_csv(META_CSV, index=False)
     faiss.write_index(index, INDEX_FP)
 
     # Load in memory for immediate use
-    global _index, _title_ids, _meta
+    global _index, _title_ids, _meta, _embeddings
     _index = index
+    _embeddings = emb
     _title_ids = np.array(ids, dtype=np.int32)
-    _meta = pd.DataFrame({"id": ids, "name": names, "text": texts})
+    _meta = _ensure_meta_shape(
+        pd.DataFrame(
+            {
+                "id": ids,
+                "name": names,
+                "text": texts,
+                "genres": genres_meta,
+                "cast_names": cast_meta,
+                "year": years_meta,
+            }
+        )
+    )
+    _refresh_lookup_state()
 
     return {"ok": True, "count": int(index.ntotal)}
 
@@ -343,7 +560,7 @@ def recs_semantic(req: SemanticReq):
     Semantic recommendations using FAISS over (plot/name) embeddings,
     optionally reranked with XGBoost if available.
     """
-    global _index, _title_ids, _meta
+    global _index, _title_ids, _meta, _embeddings
 
     if _index is None:
         if not _load_index_if_exists():
@@ -364,27 +581,44 @@ def recs_semantic(req: SemanticReq):
     q = _normalize(q.astype("float32"))
 
     top_k = max(1, int(req.topK or 10))
-    candidate_pool = max(top_k * 8, 60)
+    query_norm = _normalize_title(req.query)
+    anchor_indices = _find_anchor_indices(query_norm)
+
+    query_vectors = [q]
+    weights = [1.0]
+    if anchor_indices and _embeddings is not None:
+        anchor_vec = np.mean(_embeddings[anchor_indices], axis=0, keepdims=True).astype(
+            "float32"
+        )
+        anchor_vec = _normalize(anchor_vec)
+        query_vectors = [q, anchor_vec]
+        # Title-aware search should strongly influence movie-title queries,
+        # while still keeping some room for free-text intent.
+        weights = [0.45, 0.85]
+
+    candidate_pool = max(top_k * 12, 80)
     candidate_pool = min(candidate_pool, int(_index.ntotal))
 
-    # 2) FAISS search on larger candidate pool for better reranking quality
-    D, I = _index.search(q, candidate_pool)
-    I = I[0]
-    D = D[0]
+    # 2) Run one or more semantic searches and fuse their scores.
+    combined_scores = _search_with_query_vectors(query_vectors, weights, candidate_pool)
+    ranked_indices = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)
 
-    # 3) Collect candidates as dicts
+    # 3) Collect candidates as dicts, blending in a title-match bonus.
     items = []
-    for idx, score in zip(I, D):
-        if idx < 0:
-            continue
+    for idx, semantic_score in ranked_indices:
         title_id = int(_title_ids[idx])
-        name_arr = _meta.loc[_meta["id"] == title_id, "name"].values
-        title = str(name_arr[0]) if len(name_arr) else f"Title {title_id}"
+        row = _row_for_title_id(title_id)
+        title = str(row["name"]) if row is not None else f"Title {title_id}"
+        title_norm = _normalize_title(title)
+        title_bonus = _title_match_score(query_norm, title_norm)
+        final_score = float(semantic_score) + (0.45 * title_bonus)
         items.append(
             {
                 "title_id": title_id,
                 "title": title,
-                "score": float(score),
+                "score": final_score,
+                "semantic_score": float(semantic_score),
+                "title_match_score": float(title_bonus),
             }
         )
 
@@ -435,3 +669,31 @@ def recs_content(req: ContentReq):
         filtered.append(it)
 
     return filtered[:top_k]
+
+
+@app.post("/rerank/xgb")
+def rerank_xgb(req: XgbRerankReq):
+    """
+    Score arbitrary candidate rows using the loaded XGBoost model.
+    The backend assembles user-aware features and this endpoint applies
+    the trained reranker consistently from the Python service.
+    """
+    global XGB_MODEL
+
+    items = [dict(it) for it in (req.candidates or []) if isinstance(it, dict)]
+    if not items:
+        return {"ok": True, "model_loaded": XGB_MODEL is not None, "items": []}
+
+    if XGB_MODEL is None:
+        return {"ok": True, "model_loaded": False, "items": items}
+
+    X = build_features_for_candidates(items)
+    dmat = xgb.DMatrix(X, feature_names=FEATURE_COLUMNS)
+    preds = XGB_MODEL.predict(dmat)
+
+    for it, score in zip(items, preds):
+        it["xgb_score"] = float(score)
+
+    items = sorted(items, key=lambda x: x.get("xgb_score", 0.0), reverse=True)
+    top_k = max(1, int(req.topK or len(items)))
+    return {"ok": True, "model_loaded": True, "items": items[:top_k]}

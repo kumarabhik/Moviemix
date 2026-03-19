@@ -61,7 +61,7 @@ export function recommendationReason({
   if (strategy === "cf_user") {
     return {
       reason_code: "personalized_popular",
-      reason: "Popular with users and not already in your wishlist",
+      reason: "Popular with similar users and aligned with your interests",
     };
   }
 
@@ -176,4 +176,3 @@ export function toAbSummary(rows = []) {
     },
   };
 }
-

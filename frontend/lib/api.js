@@ -72,6 +72,15 @@ export async function getTitles() {
   return parseJson(r);
 }
 
+export async function getTopPicks(topK = 12) {
+  const url = `/api/recs/cf?topK=${topK}&${nocacheParams()}`;
+  const r = await fetch(url, {
+    cache: "no-store",
+    headers: { "Cache-Control": "no-store" },
+  });
+  return parseJson(r);
+}
+
 // ---- Wishlist (requires auth) ----
 export async function addToWishlist(titleId) {
   const res = await fetch(`/api/wishlist/${titleId}`, {
@@ -128,5 +137,39 @@ export async function getAbSummary(days = 14, scope = "all") {
     cache: "no-store",
   });
   return parseJson(res);
+}
+
+export async function getReviewsByTitle(titleId) {
+  const r = await fetch(`/api/reviews/title/${titleId}?${nocacheParams()}`, {
+    cache: "no-store",
+  });
+  return parseJson(r);
+}
+
+export async function upsertReview(titleId, payload) {
+  const r = await fetch(`/api/reviews/title/${titleId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(payload || {}),
+  });
+  return parseJson(r);
+}
+
+export async function getMyReviews() {
+  const r = await fetch("/api/reviews/me", {
+    method: "GET",
+    headers: { ...authHeaders() },
+    cache: "no-store",
+  });
+  return parseJson(r);
+}
+
+export async function getMyProfile() {
+  const r = await fetch("/api/profile/me", {
+    method: "GET",
+    headers: { ...authHeaders() },
+    cache: "no-store",
+  });
+  return parseJson(r);
 }
 

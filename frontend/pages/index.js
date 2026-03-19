@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+
 import SearchBar from "../components/SearchBar";
 import MovieCard from "../components/MovieCard";
-import { getSemantic, getTitles, getWishlist, toArray } from "../lib/api";
+import { getSemantic, getTitles, getTopPicks, getWishlist, toArray } from "../lib/api";
 import { isLoggedIn } from "../lib/session";
 
 function dedupeItems(items) {
@@ -50,8 +52,12 @@ function LoadingCards() {
 
 export default function Home() {
   const [items, setItems] = useState([]);
+  const [topPicks, setTopPicks] = useState([]);
+  const [activeSlide, setActiveSlide] = useState(0);
+  const [rotationVersion, setRotationVersion] = useState(0);
   const [savedIds, setSavedIds] = useState(new Set());
   const [loading, setLoading] = useState(false);
+  const [topLoading, setTopLoading] = useState(true);
   const [err, setErr] = useState("");
   const [headline, setHeadline] = useState("Trending now");
 
@@ -73,8 +79,26 @@ export default function Home() {
     }
   }
 
+  async function loadTopCarousel() {
+    try {
+      setTopLoading(true);
+      const res = await getTopPicks(20);
+      const picks = dedupeItems(toArray(res)).filter(
+        (it) => String(it?.poster_url || "").trim().length > 0
+      );
+      setTopPicks(picks);
+      setActiveSlide(0);
+      setRotationVersion((v) => v + 1);
+    } catch {
+      setTopPicks([]);
+    } finally {
+      setTopLoading(false);
+    }
+  }
+
   useEffect(() => {
     loadSavedIds();
+    loadTopCarousel();
 
     const last = localStorage.getItem("mm:lastQuery");
     if (last) {
@@ -96,6 +120,30 @@ export default function Home() {
     return () => window.removeEventListener("focus", onFocus);
   }, []);
 
+  useEffect(() => {
+    if (topPicks.length < 2) return undefined;
+    const timer = setInterval(() => {
+      setActiveSlide((prev) => (prev + 1) % topPicks.length);
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [topPicks, rotationVersion]);
+
+  function resetRotationCounter() {
+    setRotationVersion((v) => v + 1);
+  }
+
+  function goPrevSlide() {
+    if (!topPicks.length) return;
+    setActiveSlide((prev) => (prev - 1 + topPicks.length) % topPicks.length);
+    resetRotationCounter();
+  }
+
+  function goNextSlide() {
+    if (!topPicks.length) return;
+    setActiveSlide((prev) => (prev + 1) % topPicks.length);
+    resetRotationCounter();
+  }
+
   async function doSearch(query) {
     try {
       setErr("");
@@ -111,15 +159,85 @@ export default function Home() {
     }
   }
 
+  const currentSlide = useMemo(() => {
+    if (!topPicks.length) return null;
+    return topPicks[activeSlide] || topPicks[0];
+  }, [topPicks, activeSlide]);
+
+  const slideId = currentSlide?.title_id ?? currentSlide?.id;
+  const slideTitle = currentSlide?.title || currentSlide?.name || "Top pick";
+  const slideYear = currentSlide?.year ? `(${currentSlide.year})` : "";
+  const slidePoster = currentSlide?.poster_url || "/placeholder.jpg";
+  const slideReason = currentSlide?.reason || "Trending for MovieMix users";
+
   return (
-    <div className="space-y-4">
-      <section className="rounded-2xl border border-white/20 bg-white/50 dark:bg-slate-900/50 p-4 sm:p-6 backdrop-blur">
+    <div className="space-y-5">
+      <section className="rounded-2xl border border-sky-100/80 dark:border-slate-700 bg-white/60 dark:bg-slate-900/55 p-4 sm:p-6 backdrop-blur">
         <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight">
           Discover your next movie in seconds
         </h1>
         <div className="mt-4">
           <SearchBar onSearch={doSearch} />
         </div>
+      </section>
+
+      <section className="rounded-2xl border border-sky-100/80 dark:border-slate-700 overflow-hidden relative">
+        {topLoading && (
+          <div className="h-[320px] sm:h-[420px] bg-white/30 dark:bg-slate-900/40 animate-pulse" />
+        )}
+
+        {!topLoading && !currentSlide && (
+          <div className="h-[320px] sm:h-[420px] flex items-center justify-center bg-white/45 dark:bg-slate-900/50 text-sm text-slate-600 dark:text-slate-300">
+            Featured carousel needs titles with posters.
+          </div>
+        )}
+
+        {!topLoading && currentSlide && (
+          <div className="relative h-[320px] sm:h-[420px]">
+            <img
+              src={slidePoster}
+              alt={slideTitle}
+              className="absolute inset-0 w-full h-full object-cover"
+            />
+            <div className="absolute inset-0 bg-gradient-to-t from-slate-950/85 via-slate-900/55 to-slate-900/15" />
+
+            <button
+              type="button"
+              aria-label="Previous slide"
+              onClick={goPrevSlide}
+              className="absolute left-3 top-1/2 -translate-y-1/2 h-11 w-11 rounded-xl border border-sky-200/60 bg-sky-950/35 text-sky-100 text-2xl hover:bg-sky-900/55"
+            >
+              {"<"}
+            </button>
+
+            <button
+              type="button"
+              aria-label="Next slide"
+              onClick={goNextSlide}
+              className="absolute right-3 top-1/2 -translate-y-1/2 h-11 w-11 rounded-xl border border-sky-200/60 bg-sky-950/35 text-sky-100 text-2xl hover:bg-sky-900/55"
+            >
+              {">"}
+            </button>
+
+            <div className="absolute bottom-0 left-0 right-0 p-4 sm:p-6 text-white">
+              <div className="text-xs uppercase tracking-wide text-sky-300">MovieMix featured</div>
+              <h2 className="text-2xl sm:text-4xl font-semibold mt-1">
+                {slideTitle} {slideYear}
+              </h2>
+              <p className="mt-2 text-sm sm:text-base text-slate-200">{slideReason}</p>
+              <div className="mt-4 flex items-center gap-3">
+                {slideId ? (
+                  <Link
+                    href={`/title/${slideId}`}
+                    className="px-4 py-2 rounded-xl bg-sky-500 text-white font-medium hover:bg-sky-400"
+                  >
+                    Open title
+                  </Link>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        )}
       </section>
 
       <section className="space-y-3">

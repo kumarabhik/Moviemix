@@ -32,34 +32,41 @@ export function logout() {
   localStorage.removeItem(KEY_FALLBACK);
 }
 
-export function getUserIdFromToken(token = "") {
+function decodeTokenPayload(token = "") {
   try {
     const t = token || getToken();
-    if (!t) return "";
+    if (!t) return null;
 
     const parts = String(t).split(".");
-    if (parts.length < 2) return "";
+    if (parts.length < 2) return null;
 
-    // base64url -> base64
     let b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-
-    // pad base64 BEFORE decoding
     while (b64.length % 4 !== 0) b64 += "=";
 
-    const json = JSON.parse(atob(b64));
-
-    return String(
-      json?.userId ||
-        json?.userid ||
-        json?.user_id ||
-        json?.uid ||
-        json?.id ||
-        json?.sub ||
-        ""
-    );
+    return JSON.parse(atob(b64));
   } catch {
-    return "";
+    return null;
   }
+}
+
+export function getUserIdFromToken(token = "") {
+  const json = decodeTokenPayload(token);
+  if (!json) return "";
+  return String(
+    json?.userId ||
+      json?.userid ||
+      json?.user_id ||
+      json?.uid ||
+      json?.id ||
+      json?.sub ||
+      ""
+  );
+}
+
+export function getEmailFromToken(token = "") {
+  const json = decodeTokenPayload(token);
+  if (!json) return "";
+  return String(json?.email || "");
 }
 
 

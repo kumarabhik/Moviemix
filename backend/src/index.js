@@ -12,6 +12,8 @@ import authRoutes from "./routes/auth.js";
 import interactionsRoutes from "./routes/interactions.js";
 import eventsRouter from "./routes/events.js";
 import integrationsRouter from "./routes/integrations.js";
+import reviewsRouter from "./routes/reviews.js";
+import profileRouter from "./routes/profile.js";
 
 const PORT = process.env.PORT || 8000;
 const RECS_URL = process.env.RECS_URL || "http://recommender:8001";
@@ -71,6 +73,8 @@ app.use("/api/interactions", interactionsRoutes);
 app.use("/api/events", eventsRouter);
 app.use("/api/recs", recsRouter);
 app.use("/api/integrations", integrationsRouter);
+app.use("/api/reviews", reviewsRouter);
+app.use("/api/profile", profileRouter);
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "backend", ts: new Date().toISOString() });
@@ -129,7 +133,42 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ ok: false, error: err.message || "Internal Server Error" });
 });
 
-app.listen(PORT, () => {
-  console.log(`Backend listening on :${PORT}`);
-});
+async function ensureRuntimeTables() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS reviews (
+      id BIGSERIAL PRIMARY KEY,
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      title_id INT NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
+      rating DOUBLE PRECISION NOT NULL CHECK (rating >= 1 AND rating <= 5),
+      review_text TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE (user_id, title_id)
+    )
+  `);
 
+  await pool.query(
+    "CREATE INDEX IF NOT EXISTS ix_reviews_title_updated ON reviews(title_id, updated_at DESC)"
+  );
+  await pool.query(
+    "CREATE INDEX IF NOT EXISTS ix_reviews_user_updated ON reviews(user_id, updated_at DESC)"
+  );
+
+  // cleanup of older invalid values from previous 10-point implementation
+  await pool.query("DELETE FROM reviews WHERE rating < 1 OR rating > 5");
+  await pool.query("UPDATE interactions SET rating = NULL WHERE rating < 1 OR rating > 5");
+}
+
+async function startServer() {
+  try {
+    await ensureRuntimeTables();
+  } catch (err) {
+    console.error("Failed to ensure runtime tables:", err.message);
+  }
+
+  app.listen(PORT, () => {
+    console.log(`Backend listening on :${PORT}`);
+  });
+}
+
+startServer();

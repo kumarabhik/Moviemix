@@ -1,23 +1,70 @@
 import "bootstrap/dist/css/bootstrap.min.css";
 import "../styles/globals.css";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 
-import { getToken, isLoggedIn, logout } from "../lib/session";
+import { getEmailFromToken, getToken, isLoggedIn, logout } from "../lib/session";
+
+function toDisplayName(email = "") {
+  const raw = String(email || "").split("@")[0].trim();
+  if (!raw) return "Profile";
+  return raw.charAt(0).toUpperCase() + raw.slice(1);
+}
 
 function Header({ dark, setDark }) {
   const [logged, setLogged] = useState(false);
+  const [email, setEmail] = useState("");
+  const [menuOpen, setMenuOpen] = useState(false);
+  const profileButtonRef = useRef(null);
+  const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
 
   useEffect(() => {
-    const refresh = () => setLogged(isLoggedIn());
+    const refresh = () => {
+      const loggedIn = isLoggedIn();
+      setLogged(loggedIn);
+      setEmail(loggedIn ? getEmailFromToken() : "");
+    };
     refresh();
     window.addEventListener("storage", refresh);
     return () => window.removeEventListener("storage", refresh);
   }, []);
 
+  useEffect(() => {
+    if (!menuOpen) return undefined;
+
+    const updateMenuPosition = () => {
+      if (!profileButtonRef.current) return;
+      const rect = profileButtonRef.current.getBoundingClientRect();
+      const width = 224;
+      const maxLeft = Math.max(8, window.innerWidth - width - 8);
+      setMenuPos({
+        top: rect.bottom + 8,
+        left: Math.min(Math.max(8, rect.left), maxLeft),
+      });
+    };
+
+    updateMenuPosition();
+
+    const close = () => setMenuOpen(false);
+    const reflow = () => updateMenuPosition();
+
+    window.addEventListener("click", close);
+    window.addEventListener("resize", reflow);
+    window.addEventListener("scroll", reflow, true);
+
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("resize", reflow);
+      window.removeEventListener("scroll", reflow, true);
+    };
+  }, [menuOpen]);
+
+  const profileName = toDisplayName(email);
+  const profileInitial = profileName.charAt(0).toUpperCase();
+
   return (
-    <header className="mm-header p-4 flex items-center justify-between gap-4">
+    <header className="mm-header relative z-40 p-4 flex items-center justify-between gap-4">
       <Link href="/" className="font-semibold tracking-wide text-lg">
         MovieMix
       </Link>
@@ -25,24 +72,84 @@ function Header({ dark, setDark }) {
       <nav className="flex items-center gap-3 sm:gap-4">
         {logged ? (
           <>
-            <Link href="/foryou" className="text-sm hover:underline">
-              For You
-            </Link>
+            <div className="relative" onClick={(e) => e.stopPropagation()}>
+              <button
+                ref={profileButtonRef}
+                type="button"
+                onClick={() => setMenuOpen((v) => !v)}
+                className="px-2.5 py-1.5 rounded-xl border border-sky-200/70 dark:border-sky-800/70 bg-sky-50/70 dark:bg-sky-900/30 text-sm flex items-center gap-2"
+              >
+                <span className="h-6 w-6 rounded-full bg-sky-600 text-white text-xs font-semibold flex items-center justify-center">
+                  {profileInitial}
+                </span>
+                <span>{profileName}</span>
+              </button>
+              {menuOpen && (
+                <div
+                  className="fixed w-56 rounded-xl border border-sky-100 dark:border-slate-700 bg-white/95 dark:bg-slate-900/95 shadow-xl p-2 z-[9999]"
+                  style={{ top: menuPos.top, left: menuPos.left }}
+                >
+                  <Link
+                    href="/profile"
+                    className="block rounded-lg px-3 py-2 text-sm hover:bg-slate-100 dark:hover:bg-slate-800"
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    Your profile
+                  </Link>
+                  <Link
+                    href="/foryou"
+                    className="block rounded-lg px-3 py-2 text-sm hover:bg-slate-100 dark:hover:bg-slate-800"
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    For You
+                  </Link>
+                  <Link
+                    href="/wishlist"
+                    className="block rounded-lg px-3 py-2 text-sm hover:bg-slate-100 dark:hover:bg-slate-800"
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    Your Watchlist
+                  </Link>
+                  <Link
+                    href="/profile#ratings"
+                    className="block rounded-lg px-3 py-2 text-sm hover:bg-slate-100 dark:hover:bg-slate-800"
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    Your ratings
+                  </Link>
+                  <Link
+                    href="/wishlist"
+                    className="block rounded-lg px-3 py-2 text-sm hover:bg-slate-100 dark:hover:bg-slate-800"
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    Your lists
+                  </Link>
+                  <Link
+                    href="/profile#history"
+                    className="block rounded-lg px-3 py-2 text-sm hover:bg-slate-100 dark:hover:bg-slate-800"
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    Your watch history
+                  </Link>
+                  <button
+                    onClick={() => {
+                      logout();
+                      window.location.href = "/login";
+                    }}
+                    className="w-full text-left rounded-lg px-3 py-2 text-sm text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-900/20"
+                    type="button"
+                  >
+                    Sign out
+                  </button>
+                </div>
+              )}
+            </div>
             <Link href="/wishlist" className="text-sm hover:underline">
               Wishlist
             </Link>
             <Link href="/experiment" className="text-sm hover:underline">
               Experiments
             </Link>
-            <button
-              onClick={() => {
-                logout();
-                window.location.href = "/login";
-              }}
-              className="text-sm hover:underline"
-            >
-              Logout
-            </button>
           </>
         ) : (
           <Link href="/login" className="text-sm hover:underline">
@@ -106,4 +213,3 @@ export default function MyApp({ Component, pageProps }) {
     </div>
   );
 }
-

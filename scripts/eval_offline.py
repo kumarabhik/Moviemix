@@ -2,20 +2,36 @@ import base64
 import json
 import math
 import os
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 import psycopg2
 import requests
+from psycopg2.extras import RealDictCursor
 
 DB_URL = os.environ.get("DATABASE_URL")
 if not DB_URL:
     raise SystemExit("DATABASE_URL is required")
 
-API_BASE = os.environ.get("BACKEND_URL", "http://localhost:8000")
-TOPK = int(os.environ.get("TOPK", "50"))
+API_BASE = os.environ.get("BACKEND_URL", "http://localhost:8000").rstrip("/")
+RECS_PATH = os.environ.get("RECS_PATH", "/api/recs/cf_user")
+REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT_SEC", "120"))
+HOLDOUT_COUNT = max(1, int(os.environ.get("HOLDOUT_COUNT", "3")))
+TOPK = max(1, int(os.environ.get("TOPK", "100")))
+METRIC_KS = sorted(
+    {
+        int(value)
+        for value in os.environ.get("METRIC_KS", "10,20,50,100").split(",")
+        if str(value).strip().isdigit() and int(value) > 0
+    }
+)
+if not METRIC_KS:
+    METRIC_KS = [10, 20, 50, 100]
+TOPK = max(TOPK, max(METRIC_KS))
+MIN_HISTORY = max(HOLDOUT_COUNT + 1, int(os.environ.get("MIN_HISTORY", str(HOLDOUT_COUNT + 1))))
+
 AUTH_TOKEN = os.environ.get("AUTH_TOKEN")
-if not AUTH_TOKEN:
-    raise SystemExit("AUTH_TOKEN is required")
+EVAL_EMAIL = os.environ.get("EVAL_EMAIL")
+EVAL_PASSWORD = os.environ.get("EVAL_PASSWORD")
 
 
 def jwt_user_id(token: str) -> str | None:
@@ -30,6 +46,31 @@ def jwt_user_id(token: str) -> str | None:
         return None
 
 
+def resolve_auth_token() -> str:
+    if AUTH_TOKEN:
+        return AUTH_TOKEN
+
+    if EVAL_EMAIL and EVAL_PASSWORD:
+        resp = requests.post(
+            f"{API_BASE}/api/auth/login",
+            json={"email": EVAL_EMAIL, "password": EVAL_PASSWORD},
+            timeout=REQUEST_TIMEOUT,
+        )
+        if not resp.ok:
+            raise SystemExit(f"Login failed: {resp.status_code} {resp.text[:200]}")
+        token = resp.json().get("token")
+        if token:
+            return token
+
+    raise SystemExit("AUTH_TOKEN or EVAL_EMAIL/EVAL_PASSWORD is required")
+
+
+def normalize_genres(genres):
+    if not isinstance(genres, list):
+        return []
+    return [str(g).strip().lower() for g in genres if str(g).strip()]
+
+
 def ndcg_at_k(rec_ids, relevant_ids, k):
     dcg = 0.0
     for idx, rid in enumerate(rec_ids[:k], start=1):
@@ -41,6 +82,17 @@ def ndcg_at_k(rec_ids, relevant_ids, k):
     return (dcg / idcg) if idcg > 0 else 0.0
 
 
+def hit_rate_at_k(rec_ids, relevant_ids, k):
+    return 1.0 if any(rid in relevant_ids for rid in rec_ids[:k]) else 0.0
+
+
+def mrr_at_k(rec_ids, relevant_ids, k):
+    for idx, rid in enumerate(rec_ids[:k], start=1):
+        if rid in relevant_ids:
+            return 1.0 / idx
+    return 0.0
+
+
 def get_popularity_map(cur):
     cur.execute("SELECT title_id, cnt FROM popular_titles")
     rows = cur.fetchall()
@@ -49,104 +101,278 @@ def get_popularity_map(cur):
     return pop_map, total
 
 
-def user_top_genres(cur, user_id, topn=5):
-    cur.execute(
-        """
-        SELECT unnest(t.genres) AS g, COUNT(*) AS c
+def fetch_positive_histories(conn):
+    sql = """
+    WITH user_titles AS (
+      SELECT
+        user_id,
+        title_id,
+        MAX(last_ts) AS last_ts,
+        SUM(signal)::float AS signal,
+        BOOL_OR(in_wishlist) AS in_wishlist,
+        BOOL_OR(watched) AS watched,
+        MAX(rating) AS rating
+      FROM (
+        SELECT
+          i.user_id,
+          i.title_id,
+          i.ts AS last_ts,
+          GREATEST(COALESCE(i.weight, 0), 0)
+            + CASE WHEN i.watched THEN 3 ELSE 0 END
+            + CASE WHEN COALESCE(i.rating, 0) >= 4 THEN i.rating ELSE 0 END AS signal,
+          FALSE AS in_wishlist,
+          COALESCE(i.watched, FALSE) AS watched,
+          i.rating AS rating
         FROM interactions i
-        JOIN titles t ON t.id = i.title_id
-        WHERE i.user_id = %s
-          AND (i.watched = true OR i.rating >= 4 OR i.weight >= 3)
-        GROUP BY g
-        ORDER BY c DESC
-        LIMIT %s
-        """,
-        (str(user_id), int(topn)),
+        WHERE i.title_id IS NOT NULL
+          AND (i.watched = TRUE OR i.rating >= 4 OR i.weight >= 1)
+
+        UNION ALL
+
+        SELECT
+          w.user_id,
+          w.title_id,
+          w.ts AS last_ts,
+          3.0 AS signal,
+          TRUE AS in_wishlist,
+          FALSE AS watched,
+          NULL::double precision AS rating
+        FROM wishlists w
+      ) src
+      GROUP BY user_id, title_id
     )
-    return {r[0] for r in cur.fetchall() if r and r[0]}
+    SELECT
+      ut.user_id,
+      ut.title_id,
+      ut.last_ts,
+      ut.signal,
+      ut.in_wishlist,
+      ut.watched,
+      ut.rating,
+      t.name,
+      t.year,
+      t.genres,
+      COALESCE(pt.cnt, 0)::float AS popularity_count
+    FROM user_titles ut
+    JOIN titles t ON t.id = ut.title_id
+    LEFT JOIN popular_titles pt ON pt.title_id = ut.title_id
+    ORDER BY ut.user_id, ut.last_ts ASC, ut.signal ASC, ut.title_id ASC
+    """
+
+    by_user = defaultdict(list)
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(sql)
+        for row in cur.fetchall():
+            by_user[str(row["user_id"])].append(dict(row))
+    return by_user
 
 
-def title_genres(cur, title_id):
-    cur.execute("SELECT genres FROM titles WHERE id = %s", (int(title_id),))
-    row = cur.fetchone()
-    if not row or not row[0]:
-        return set()
-    return set(row[0])
+def top_genres_from_rows(rows, topn=5):
+    counts = Counter()
+    for row in rows or []:
+        counts.update(normalize_genres(row.get("genres")))
+    return {genre for genre, _ in counts.most_common(topn)}
+
+
+def fetch_title_genres_map(cur, title_ids):
+    ids = sorted({int(title_id) for title_id in title_ids if title_id is not None})
+    if not ids:
+        return {}
+
+    cur.execute("SELECT id, genres FROM titles WHERE id = ANY(%s::int[])", (ids,))
+    return {
+        int(row[0]): set(row[1] or [])
+        for row in cur.fetchall()
+        if row and row[0] is not None
+    }
+
+
+def fetch_holdout_snapshot(conn, user_id, holdout_ids):
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT user_id, title_id, source, ts
+            FROM wishlists
+            WHERE user_id = %s AND title_id = ANY(%s::int[])
+            ORDER BY ts ASC, title_id ASC, source ASC
+            """,
+            (str(user_id), sorted(holdout_ids)),
+        )
+        wishlist_rows = [dict(row) for row in cur.fetchall()]
+
+        cur.execute(
+            """
+            SELECT user_id, title_id, rating, watched, weight, ts
+            FROM interactions
+            WHERE user_id = %s AND title_id = ANY(%s::int[])
+            ORDER BY ts ASC, title_id ASC
+            """,
+            (str(user_id), sorted(holdout_ids)),
+        )
+        interaction_rows = [dict(row) for row in cur.fetchall()]
+
+    return wishlist_rows, interaction_rows
+
+
+def hide_holdout(conn, user_id, holdout_ids):
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM wishlists WHERE user_id = %s AND title_id = ANY(%s::int[])",
+            (str(user_id), sorted(holdout_ids)),
+        )
+        cur.execute(
+            "DELETE FROM interactions WHERE user_id = %s AND title_id = ANY(%s::int[])",
+            (str(user_id), sorted(holdout_ids)),
+        )
+    conn.commit()
+
+
+def restore_holdout(conn, wishlist_rows, interaction_rows):
+    with conn.cursor() as cur:
+        for row in interaction_rows:
+            cur.execute(
+                """
+                INSERT INTO interactions (user_id, title_id, rating, watched, weight, ts)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (user_id, title_id)
+                DO UPDATE SET
+                  rating = EXCLUDED.rating,
+                  watched = EXCLUDED.watched,
+                  weight = EXCLUDED.weight,
+                  ts = EXCLUDED.ts
+                """,
+                (
+                    row["user_id"],
+                    row["title_id"],
+                    row["rating"],
+                    row["watched"],
+                    row["weight"],
+                    row["ts"],
+                ),
+            )
+
+        for row in wishlist_rows:
+            cur.execute(
+                """
+                INSERT INTO wishlists (user_id, title_id, source, ts)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (user_id, title_id, source)
+                DO UPDATE SET ts = EXCLUDED.ts
+                """,
+                (
+                    row["user_id"],
+                    row["title_id"],
+                    row["source"],
+                    row["ts"],
+                ),
+            )
+    conn.commit()
+
+
+def fetch_recommendations(token):
+    resp = requests.get(
+        f"{API_BASE}{RECS_PATH}",
+        params={"topK": TOPK},
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=REQUEST_TIMEOUT,
+    )
+    if not resp.ok:
+        raise RuntimeError(f"API error: {resp.status_code} {resp.text[:200]}")
+    return resp.json().get("items", [])
+
+
+def metric_summary(rec_ids, relevant_ids):
+    out = {}
+    for k in METRIC_KS:
+        out[f"ndcg@{k}"] = ndcg_at_k(rec_ids, relevant_ids, k)
+        out[f"hit_rate@{k}"] = hit_rate_at_k(rec_ids, relevant_ids, k)
+        out[f"mrr@{k}"] = mrr_at_k(rec_ids, relevant_ids, k)
+    return out
 
 
 def main():
+    token = resolve_auth_token()
+    token_uid = jwt_user_id(token)
+
     conn = psycopg2.connect(DB_URL)
-    cur = conn.cursor()
+    histories = fetch_positive_histories(conn)
+    users = [user_id for user_id, rows in histories.items() if len(rows) >= MIN_HISTORY]
 
-    cur.execute(
-        """
-        SELECT user_id, title_id, ts
-        FROM interactions
-        WHERE watched = true OR rating >= 4 OR weight >= 3
-        ORDER BY user_id, ts
-        """
-    )
-    rows = cur.fetchall()
-
-    by_user = defaultdict(list)
-    for user_id, title_id, ts in rows:
-        by_user[user_id].append((ts, title_id))
-
-    users = [u for u in by_user if len(by_user[u]) >= 2]
-    token_uid = jwt_user_id(AUTH_TOKEN)
     if token_uid:
-        users = [u for u in users if str(u) == str(token_uid)]
+        users = [user_id for user_id in users if str(user_id) == str(token_uid)]
 
-    print("Token userId:", token_uid)
-    print("Evaluating users:", [str(u) for u in users])
-
-    pop_map, pop_total = get_popularity_map(cur)
-    coverage = set()
-
-    agg = {
-        "precision": 0.0,
-        "recall": 0.0,
-        "ndcg": 0.0,
-        "genre_match": 0.0,
-        "novelty": 0.0,
-        "users": 0,
-    }
-
-    for user in users:
-        positives = [t for _, t in by_user[user]]
-        holdout = {positives[-1]}
-        top_genres = user_top_genres(cur, user, topn=5)
-
-        resp = requests.get(
-            f"{API_BASE}/api/recs/cf_user",
-            params={"topK": TOPK},
-            headers={"Authorization": f"Bearer {AUTH_TOKEN}"},
-            timeout=30,
+    if not users:
+        raise SystemExit(
+            f"No users with at least {MIN_HISTORY} positive titles were found for evaluation."
         )
-        if not resp.ok:
-            print("API error:", resp.status_code, resp.text[:200])
+
+    with conn.cursor() as cur:
+        pop_map, pop_total = get_popularity_map(cur)
+
+    print("Evaluating users:", [str(user_id) for user_id in users])
+    print("Holdout count:", HOLDOUT_COUNT)
+    print("TopK:", TOPK)
+    print("Metric Ks:", METRIC_KS)
+
+    coverage = set()
+    aggregates = defaultdict(float)
+    evaluated = 0
+
+    for user_id in users:
+        rows = histories[str(user_id)]
+        holdout_rows = rows[-HOLDOUT_COUNT:]
+        train_rows = rows[:-HOLDOUT_COUNT]
+        if not train_rows:
+            print(f"\nUser: {user_id}\nSkipping: not enough remaining history after holdout.")
             continue
 
-        items = resp.json().get("items", [])
+        holdout_ids = {int(row["title_id"]) for row in holdout_rows}
+        holdout_titles = [
+            f"{row['name']} ({row['year']})" if row.get("year") else str(row["name"])
+            for row in holdout_rows
+        ]
+        top_genres = top_genres_from_rows(train_rows, topn=5)
+
+        wishlist_rows, interaction_rows = fetch_holdout_snapshot(conn, user_id, holdout_ids)
+        if not wishlist_rows and not interaction_rows:
+            print(f"\nUser: {user_id}\nSkipping: could not snapshot holdout rows.")
+            continue
+
+        hide_holdout(conn, user_id, holdout_ids)
+        try:
+            items = fetch_recommendations(token)
+        finally:
+            restore_holdout(conn, wishlist_rows, interaction_rows)
+
         rec_ids = []
-        for it in items:
-            rid = it.get("title_id") if it.get("title_id") is not None else it.get("id")
-            if rid is not None:
-                rec_ids.append(int(rid))
+        title_lookup = {}
+        for item in items:
+            rid = item.get("title_id") if item.get("title_id") is not None else item.get("id")
+            if rid is None:
+                continue
+            rid = int(rid)
+            rec_ids.append(rid)
+            title_lookup[rid] = item.get("title") or item.get("name") or str(rid)
 
         if not rec_ids:
+            print(f"\nUser: {user_id}\nSkipping: recommender returned no ids.")
             continue
 
-        hits = len([rid for rid in rec_ids[:TOPK] if rid in holdout])
-        precision = hits / max(1, TOPK)
-        recall = hits / max(1, len(holdout))
-        ndcg = ndcg_at_k(rec_ids, holdout, TOPK)
+        metrics = metric_summary(rec_ids, holdout_ids)
+        hit_positions = [
+            (idx, rid, title_lookup.get(rid, str(rid)))
+            for idx, rid in enumerate(rec_ids, start=1)
+            if rid in holdout_ids
+        ]
+
+        with conn.cursor() as cur:
+            genre_map = fetch_title_genres_map(cur, rec_ids[:TOPK])
 
         matched = 0
         novelty_score = 0.0
         for rid in rec_ids[:TOPK]:
             coverage.add(rid)
-            if title_genres(cur, rid) & top_genres:
+            if genre_map.get(rid, set()) & top_genres:
                 matched += 1
             pop = pop_map.get(rid, 0.0)
             p = (pop / pop_total) if pop_total > 0 else 0.0
@@ -155,37 +381,39 @@ def main():
         genre_match = matched / max(1, len(rec_ids[:TOPK]))
         novelty = novelty_score / max(1, len(rec_ids[:TOPK]))
 
-        print(f"\nUser: {user}")
-        print(f"Precision@{TOPK}: {precision:.3f}")
-        print(f"Recall@{TOPK}: {recall:.3f}")
-        print(f"NDCG@{TOPK}: {ndcg:.3f}")
+        print(f"\nUser: {user_id}")
+        print("Holdout titles:", holdout_titles)
+        print("Hit positions:", hit_positions if hit_positions else "none")
+        for k in METRIC_KS:
+            print(
+                f"NDCG@{k}: {metrics[f'ndcg@{k}']:.3f} | "
+                f"HitRate@{k}: {metrics[f'hit_rate@{k}']:.3f} | "
+                f"MRR@{k}: {metrics[f'mrr@{k}']:.3f}"
+            )
         print(f"Genre-match@{TOPK}: {genre_match:.3f}")
         print(f"Novelty@{TOPK}: {novelty:.3f}")
 
-        agg["precision"] += precision
-        agg["recall"] += recall
-        agg["ndcg"] += ndcg
-        agg["genre_match"] += genre_match
-        agg["novelty"] += novelty
-        agg["users"] += 1
+        for key, value in metrics.items():
+            aggregates[key] += value
+        aggregates["genre_match"] += genre_match
+        aggregates["novelty"] += novelty
+        evaluated += 1
 
-    n = agg["users"]
     print("\n===== OFFLINE EVALUATION SUMMARY =====")
-    print(f"Users evaluated: {n}")
-    if n:
-        print(f"Precision@{TOPK}: {agg['precision']/n:.3f}")
-        print(f"Recall@{TOPK}: {agg['recall']/n:.3f}")
-        print(f"NDCG@{TOPK}: {agg['ndcg']/n:.3f}")
-        print(f"Genre-match@{TOPK}: {agg['genre_match']/n:.3f}")
-        print(f"Novelty@{TOPK}: {agg['novelty']/n:.3f}")
+    print(f"Users evaluated: {evaluated}")
+    if evaluated:
+        for k in METRIC_KS:
+            print(f"NDCG@{k}: {aggregates[f'ndcg@{k}'] / evaluated:.3f}")
+            print(f"HitRate@{k}: {aggregates[f'hit_rate@{k}'] / evaluated:.3f}")
+            print(f"MRR@{k}: {aggregates[f'mrr@{k}'] / evaluated:.3f}")
+        print(f"Genre-match@{TOPK}: {aggregates['genre_match'] / evaluated:.3f}")
+        print(f"Novelty@{TOPK}: {aggregates['novelty'] / evaluated:.3f}")
     else:
         print("No valid users to evaluate.")
     print(f"Coverage@{TOPK}: {len(coverage)} unique titles")
 
-    cur.close()
     conn.close()
 
 
 if __name__ == "__main__":
     main()
-

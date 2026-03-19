@@ -70,7 +70,7 @@ router.post("/", async (req, res) => {
         const m = meta || {};
         const val = m.rating ?? m.value ?? null;
         const num = Number(val);
-        if (!Number.isNaN(num)) rating = num;
+        if (!Number.isNaN(num) && num >= 1 && num <= 5) rating = num;
       }
 
       await pool.query(
