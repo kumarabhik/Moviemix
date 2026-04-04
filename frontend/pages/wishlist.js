@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { isLoggedIn, logout } from "../lib/session";
 
 import MovieCard from "../components/MovieCard";
 import { getWishlist, importFromTrakt, toArray } from "../lib/api";
@@ -11,12 +12,25 @@ export default function WishlistPage() {
 
   async function loadWishlist() {
     try {
+      if (!isLoggedIn()) {
+        setErr("Session expired. Please log in again.");
+        setLoading(false);
+        window.location.href = "/login";
+        return;
+      }
       setErr("");
       setLoading(true);
       const res = await getWishlist();
       setItems(toArray(res));
     } catch (e) {
       console.error(e);
+      const msg = String(e?.message || e || "");
+      if (msg === "missing_token" || msg === "invalid_token") {
+        logout();
+        setErr("Session expired. Please log in again.");
+        window.location.href = "/login";
+        return;
+      }
       setErr("Failed to load wishlist");
     } finally {
       setLoading(false);
@@ -80,4 +94,3 @@ export default function WishlistPage() {
     </div>
   );
 }
-

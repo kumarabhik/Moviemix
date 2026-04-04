@@ -1,4 +1,6 @@
 import base64
+import hashlib
+import hmac
 import json
 import math
 import os
@@ -28,10 +30,17 @@ if not METRIC_KS:
     METRIC_KS = [10, 20, 50, 100]
 TOPK = max(TOPK, max(METRIC_KS))
 MIN_HISTORY = max(HOLDOUT_COUNT + 1, int(os.environ.get("MIN_HISTORY", str(HOLDOUT_COUNT + 1))))
+MAX_EVAL_USERS = max(0, int(os.environ.get("MAX_EVAL_USERS", "0")))
 
 AUTH_TOKEN = os.environ.get("AUTH_TOKEN")
 EVAL_EMAIL = os.environ.get("EVAL_EMAIL")
 EVAL_PASSWORD = os.environ.get("EVAL_PASSWORD")
+JWT_SECRET = os.environ.get("JWT_SECRET")
+EVAL_ALL_USERS = os.environ.get("EVAL_ALL_USERS", "0") == "1"
+
+
+def b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("utf-8").rstrip("=")
 
 
 def jwt_user_id(token: str) -> str | None:
@@ -46,7 +55,21 @@ def jwt_user_id(token: str) -> str | None:
         return None
 
 
-def resolve_auth_token() -> str:
+def sign_eval_token(user_id: str, email: str | None = None) -> str:
+    if not JWT_SECRET:
+        raise SystemExit("JWT_SECRET is required to generate evaluation tokens")
+
+    header = {"alg": "HS256", "typ": "JWT"}
+    payload = {"userId": str(user_id), "email": email or f"eval+{user_id}@moviemix.local"}
+
+    header_b64 = b64url_encode(json.dumps(header, separators=(",", ":")).encode("utf-8"))
+    payload_b64 = b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
+    sig = hmac.new(JWT_SECRET.encode("utf-8"), signing_input, hashlib.sha256).digest()
+    return f"{header_b64}.{payload_b64}.{b64url_encode(sig)}"
+
+
+def resolve_auth_token() -> str | None:
     if AUTH_TOKEN:
         return AUTH_TOKEN
 
@@ -62,7 +85,10 @@ def resolve_auth_token() -> str:
         if token:
             return token
 
-    raise SystemExit("AUTH_TOKEN or EVAL_EMAIL/EVAL_PASSWORD is required")
+    if JWT_SECRET:
+        return None
+
+    raise SystemExit("AUTH_TOKEN, EVAL_EMAIL/EVAL_PASSWORD, or JWT_SECRET is required")
 
 
 def normalize_genres(genres):
@@ -84,6 +110,21 @@ def ndcg_at_k(rec_ids, relevant_ids, k):
 
 def hit_rate_at_k(rec_ids, relevant_ids, k):
     return 1.0 if any(rid in relevant_ids for rid in rec_ids[:k]) else 0.0
+
+
+def precision_at_k(rec_ids, relevant_ids, k):
+    rec_slice = rec_ids[:k]
+    if not rec_slice:
+        return 0.0
+    hits = sum(1 for rid in rec_slice if rid in relevant_ids)
+    return hits / len(rec_slice)
+
+
+def recall_at_k(rec_ids, relevant_ids, k):
+    if not relevant_ids:
+        return 0.0
+    hits = sum(1 for rid in rec_ids[:k] if rid in relevant_ids)
+    return hits / len(relevant_ids)
 
 
 def mrr_at_k(rec_ids, relevant_ids, k):
@@ -181,7 +222,7 @@ def fetch_title_genres_map(cur, title_ids):
 
     cur.execute("SELECT id, genres FROM titles WHERE id = ANY(%s::int[])", (ids,))
     return {
-        int(row[0]): set(row[1] or [])
+        int(row[0]): set(normalize_genres(row[1] or []))
         for row in cur.fetchall()
         if row and row[0] is not None
     }
@@ -284,6 +325,8 @@ def fetch_recommendations(token):
 def metric_summary(rec_ids, relevant_ids):
     out = {}
     for k in METRIC_KS:
+        out[f"precision@{k}"] = precision_at_k(rec_ids, relevant_ids, k)
+        out[f"recall@{k}"] = recall_at_k(rec_ids, relevant_ids, k)
         out[f"ndcg@{k}"] = ndcg_at_k(rec_ids, relevant_ids, k)
         out[f"hit_rate@{k}"] = hit_rate_at_k(rec_ids, relevant_ids, k)
         out[f"mrr@{k}"] = mrr_at_k(rec_ids, relevant_ids, k)
@@ -292,14 +335,17 @@ def metric_summary(rec_ids, relevant_ids):
 
 def main():
     token = resolve_auth_token()
-    token_uid = jwt_user_id(token)
+    token_uid = jwt_user_id(token) if token else None
 
     conn = psycopg2.connect(DB_URL)
     histories = fetch_positive_histories(conn)
     users = [user_id for user_id, rows in histories.items() if len(rows) >= MIN_HISTORY]
+    users = sorted(users)
 
-    if token_uid:
+    if token_uid and not EVAL_ALL_USERS:
         users = [user_id for user_id in users if str(user_id) == str(token_uid)]
+    elif MAX_EVAL_USERS > 0:
+        users = users[:MAX_EVAL_USERS]
 
     if not users:
         raise SystemExit(
@@ -313,6 +359,7 @@ def main():
     print("Holdout count:", HOLDOUT_COUNT)
     print("TopK:", TOPK)
     print("Metric Ks:", METRIC_KS)
+    print("Max eval users:", MAX_EVAL_USERS or "all")
 
     coverage = set()
     aggregates = defaultdict(float)
@@ -340,7 +387,8 @@ def main():
 
         hide_holdout(conn, user_id, holdout_ids)
         try:
-            items = fetch_recommendations(token)
+            user_token = token or sign_eval_token(user_id)
+            items = fetch_recommendations(user_token)
         finally:
             restore_holdout(conn, wishlist_rows, interaction_rows)
 
@@ -386,6 +434,8 @@ def main():
         print("Hit positions:", hit_positions if hit_positions else "none")
         for k in METRIC_KS:
             print(
+                f"Precision@{k}: {metrics[f'precision@{k}']:.3f} | "
+                f"Recall@{k}: {metrics[f'recall@{k}']:.3f} | "
                 f"NDCG@{k}: {metrics[f'ndcg@{k}']:.3f} | "
                 f"HitRate@{k}: {metrics[f'hit_rate@{k}']:.3f} | "
                 f"MRR@{k}: {metrics[f'mrr@{k}']:.3f}"
@@ -403,6 +453,8 @@ def main():
     print(f"Users evaluated: {evaluated}")
     if evaluated:
         for k in METRIC_KS:
+            print(f"Precision@{k}: {aggregates[f'precision@{k}'] / evaluated:.3f}")
+            print(f"Recall@{k}: {aggregates[f'recall@{k}'] / evaluated:.3f}")
             print(f"NDCG@{k}: {aggregates[f'ndcg@{k}'] / evaluated:.3f}")
             print(f"HitRate@{k}: {aggregates[f'hit_rate@{k}'] / evaluated:.3f}")
             print(f"MRR@{k}: {aggregates[f'mrr@{k}'] / evaluated:.3f}")

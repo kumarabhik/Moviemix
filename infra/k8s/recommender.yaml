@@ -13,9 +13,25 @@ spec:
       labels:
         app: recommender
     spec:
+      initContainers:
+        - name: seed-recommender-data
+          image: ghcr.io/i4mgro0t/moviemix-recommender:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-lc"]
+          args:
+            - >
+              if [ -z "$(ls -A /mnt/data 2>/dev/null)" ]; then
+                echo "Seeding recommender data into PVC...";
+                cp -r /app/data/. /mnt/data/;
+              else
+                echo "Reusing existing recommender PVC contents.";
+              fi
+          volumeMounts:
+            - name: recommender-data
+              mountPath: /mnt/data
       containers:
         - name: recommender
-          image: moviemix-recommender:latest
+          image: ghcr.io/i4mgro0t/moviemix-recommender:latest
           imagePullPolicy: IfNotPresent
           env:
             - name: DATABASE_URL

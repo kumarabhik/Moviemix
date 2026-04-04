@@ -9,6 +9,7 @@ import {
 
 import MovieCard from "../../components/MovieCard";
 import {
+  apiUrl,
   getReviewsByTitle,
   getSimilarBySeedText,
   getTitleById,
@@ -158,7 +159,7 @@ export default function TitlePage() {
   useEffect(() => {
     if (!item) return;
     const token = getToken();
-    fetch("/api/interactions", {
+    fetch(apiUrl("/api/interactions"), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

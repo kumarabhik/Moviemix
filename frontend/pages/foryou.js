@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 
 import MovieCard from "../components/MovieCard";
-import { getWishlist, toArray } from "../lib/api";
+import { apiUrl, getWishlist, toArray } from "../lib/api";
 import {
   abVariantFromUserId,
   getToken,
@@ -71,14 +71,14 @@ export default function ForYou() {
 
         let json = { items: [] };
         if (endpoint === "/api/recs/cf_user" && token) {
-          const resp = await fetch(endpoint, {
+          const resp = await fetch(apiUrl(endpoint), {
             cache: "no-store",
             headers: { Authorization: `Bearer ${token}` },
           });
           json = await resp.json().catch(() => ({}));
           if (!resp.ok) throw new Error(json?.error || "cf_user_failed");
         } else {
-          const resp = await fetch("/api/recs/cf", { cache: "no-store" });
+          const resp = await fetch(apiUrl("/api/recs/cf"), { cache: "no-store" });
           json = await resp.json().catch(() => ({}));
           if (!resp.ok) throw new Error(json?.error || "cf_failed");
         }
@@ -153,4 +153,3 @@ export default function ForYou() {
     </div>
   );
 }
-

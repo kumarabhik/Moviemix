@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: moviemix-frontend:latest
+          image: ghcr.io/i4mgro0t/moviemix-frontend:latest
           imagePullPolicy: IfNotPresent
           env:
             - name: BACKEND_ORIGIN

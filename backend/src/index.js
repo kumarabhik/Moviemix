@@ -17,9 +17,26 @@ import profileRouter from "./routes/profile.js";
 
 const PORT = process.env.PORT || 8000;
 const RECS_URL = process.env.RECS_URL || "http://recommender:8001";
+const allowedOrigins = String(process.env.CORS_ORIGIN || "")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean);
 
 const app = express();
-app.use(cors());
+app.use(
+  cors(
+    allowedOrigins.length === 0
+      ? {}
+      : {
+          origin(origin, callback) {
+            if (!origin || allowedOrigins.includes(origin)) {
+              return callback(null, true);
+            }
+            return callback(new Error("Not allowed by CORS"));
+          },
+        }
+  )
+);
 app.use(express.json());
 
 app.set("etag", false);
@@ -134,6 +151,26 @@ app.use((err, _req, res, _next) => {
 });
 
 async function ensureRuntimeTables() {
+  await pool.query("ALTER TABLE users ALTER COLUMN pass_hash DROP NOT NULL");
+  await pool.query(
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_provider TEXT NOT NULL DEFAULT 'local'"
+  );
+  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS google_sub TEXT");
+  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name TEXT");
+  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT");
+  await pool.query(
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_users_google_sub ON users(google_sub) WHERE google_sub IS NOT NULL"
+  );
+  await pool.query(`
+    UPDATE users
+    SET auth_provider = CASE
+      WHEN google_sub IS NOT NULL AND pass_hash IS NOT NULL THEN 'hybrid'
+      WHEN google_sub IS NOT NULL THEN 'google'
+      ELSE 'local'
+    END
+    WHERE auth_provider IS NULL OR trim(auth_provider) = ''
+  `);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS reviews (
       id BIGSERIAL PRIMARY KEY,

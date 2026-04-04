@@ -21,7 +21,11 @@ CREATE TABLE IF NOT EXISTS titles (
 CREATE TABLE IF NOT EXISTS users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   email TEXT UNIQUE NOT NULL,
-  pass_hash TEXT NOT NULL,
+  pass_hash TEXT,
+  auth_provider TEXT NOT NULL DEFAULT 'local',
+  google_sub TEXT UNIQUE,
+  display_name TEXT,
+  avatar_url TEXT,
   created_at TIMESTAMP DEFAULT now()
 );
 

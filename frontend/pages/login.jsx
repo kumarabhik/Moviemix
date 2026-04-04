@@ -1,4 +1,19 @@
 import { useState } from "react";
+import { apiUrl } from "../lib/api";
+import { setToken } from "../lib/session";
+
+const GOOGLE_AUTH_ENABLED = String(process.env.NEXT_PUBLIC_ENABLE_GOOGLE_AUTH || "0") === "1";
+
+function humanizeAuthError(code = "") {
+  switch (String(code || "").trim()) {
+    case "use_google_login":
+      return "This account uses Google sign in. Please continue with Google.";
+    case "invalid_credentials":
+      return "Invalid email or password.";
+    default:
+      return String(code || "login_failed").replaceAll("_", " ");
+  }
+}
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -9,18 +24,22 @@ export default function LoginPage() {
     e.preventDefault();
     setErr("");
     try {
-      const r = await fetch("/api/auth/login", {
+      const r = await fetch(apiUrl("/api/auth/login"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
       });
       const j = await r.json();
-      if (!r.ok) throw new Error(j?.error || "login_failed");
-      localStorage.setItem("moviemix_token", j.token);
+      if (!r.ok) throw new Error(humanizeAuthError(j?.error || "login_failed"));
+      setToken(j.token);
       window.location.href = "/"; // back to home
     } catch (e) {
       setErr(String(e.message || e));
     }
+  };
+
+  const startGoogleLogin = () => {
+    window.location.href = apiUrl("/api/auth/google/start?returnTo=/");
   };
 
   return (
@@ -54,6 +73,20 @@ export default function LoginPage() {
                   <div className="alert alert-danger py-2 mb-3">
                     {err}
                   </div>
+                )}
+
+                {GOOGLE_AUTH_ENABLED && (
+                  <>
+                    <button
+                      type="button"
+                      className="btn btn-outline-secondary w-100 mb-3 d-flex align-items-center justify-content-center gap-2"
+                      onClick={startGoogleLogin}
+                    >
+                      <span aria-hidden="true">G</span>
+                      <span>Continue with Google</span>
+                    </button>
+                    <div className="text-center text-muted small mb-3">or use your email</div>
+                  </>
                 )}
 
                 <form

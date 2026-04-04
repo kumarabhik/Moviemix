@@ -11,7 +11,7 @@ router.get("/me", async (req, res) => {
 
     const userQ = await pool.query(
       `
-      SELECT id, email, created_at
+      SELECT id, email, display_name, avatar_url, auth_provider, created_at
       FROM users
       WHERE id = $1
       LIMIT 1

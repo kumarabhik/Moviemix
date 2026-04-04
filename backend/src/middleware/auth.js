@@ -16,6 +16,9 @@ export function requireAuth(req, res, next) {
     req.user = {
       id: payload.userId,
       email: payload.email,
+      name: payload.name || "",
+      avatarUrl: payload.avatarUrl || "",
+      authProvider: payload.authProvider || "",
     };
     return next();
   } catch (err) {
@@ -25,4 +28,3 @@ export function requireAuth(req, res, next) {
 }
 
 export default requireAuth;
-

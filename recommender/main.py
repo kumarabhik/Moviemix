@@ -75,6 +75,12 @@ _title_ids: Optional[np.ndarray] = None
 _meta: Optional[pd.DataFrame] = None
 _embeddings: Optional[np.ndarray] = None
 _id_to_idx: Dict[int, int] = {}
+_title_names: Optional[np.ndarray] = None
+_title_norms: Optional[np.ndarray] = None
+_title_token_sets: List[frozenset[str]] = []
+_title_token_sizes: Optional[np.ndarray] = None
+_title_norm_to_indices: Dict[str, np.ndarray] = {}
+_token_to_indices: Dict[str, np.ndarray] = {}
 
 # ---------------------------
 # XGBoost model + feature builder
@@ -122,6 +128,13 @@ def _safe_list(value) -> List[str]:
             pass
         return [text]
     return []
+
+
+def _safe_float(value) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return 0.0
 
 
 def _build_search_text(name: str, plot: str, genres=None, cast_names=None, year=None) -> str:
@@ -183,80 +196,178 @@ def _ensure_meta_shape(meta: pd.DataFrame) -> pd.DataFrame:
 
 def _refresh_lookup_state():
     global _id_to_idx, _meta
-    if _title_ids is None:
+    global _title_names, _title_norms, _title_token_sets, _title_token_sizes
+    global _title_norm_to_indices, _token_to_indices
+    if _title_ids is None or _meta is None:
         _id_to_idx = {}
+        _title_names = None
+        _title_norms = None
+        _title_token_sets = []
+        _title_token_sizes = None
+        _title_norm_to_indices = {}
+        _token_to_indices = {}
         return
+    _meta = _ensure_meta_shape(_meta)
     _id_to_idx = {int(title_id): idx for idx, title_id in enumerate(_title_ids.tolist())}
-    if _meta is not None:
-        _meta = _ensure_meta_shape(_meta)
+    _title_names = _meta["name"].fillna("").astype(str).to_numpy(dtype=str, copy=True)
+    _title_norms = _meta["title_norm"].fillna("").astype(str).to_numpy(dtype=str, copy=True)
+
+    title_token_sets: List[frozenset[str]] = []
+    title_token_sizes = np.zeros(len(_title_norms), dtype=np.int16)
+    title_norm_to_indices: Dict[str, List[int]] = {}
+    token_to_indices: Dict[str, List[int]] = {}
+
+    for idx, title_norm in enumerate(_title_norms):
+        title_norm_to_indices.setdefault(title_norm, []).append(idx)
+        tokens = frozenset(title_norm.split())
+        title_token_sets.append(tokens)
+        title_token_sizes[idx] = len(tokens)
+        for token in tokens:
+            token_to_indices.setdefault(token, []).append(idx)
+
+    _title_token_sets = title_token_sets
+    _title_token_sizes = title_token_sizes
+    _title_norm_to_indices = {
+        title_norm: np.asarray(indices, dtype=np.int32)
+        for title_norm, indices in title_norm_to_indices.items()
+    }
+    _token_to_indices = {
+        token: np.asarray(indices, dtype=np.int32)
+        for token, indices in token_to_indices.items()
+    }
 
 
-def _row_for_title_id(title_id: int) -> Optional[pd.Series]:
-    if _meta is None or "id" not in _meta.columns:
-        return None
-    idx = _id_to_idx.get(int(title_id))
-    if idx is not None and 0 <= idx < len(_meta):
-        return _meta.iloc[idx]
-    rows = _meta.loc[_meta["id"] == int(title_id)]
-    if rows.empty:
-        return None
-    return rows.iloc[0]
+def _candidate_indices_for_tokens(tokens: List[str]) -> np.ndarray:
+    candidate_groups = [_token_to_indices[token] for token in tokens if token in _token_to_indices]
+    if not candidate_groups:
+        return np.empty(0, dtype=np.int32)
+    if len(candidate_groups) == 1:
+        return candidate_groups[0]
+    return np.unique(np.concatenate(candidate_groups))
 
 
-def _title_match_score(query_norm: str, title_norm: str) -> float:
-    if not query_norm or not title_norm:
-        return 0.0
-    if query_norm == title_norm:
-        return 1.0
-    if title_norm.startswith(query_norm) or query_norm.startswith(title_norm):
-        return 0.82
-    if query_norm in title_norm or title_norm in query_norm:
-        return 0.68
+def _title_match_scores(query_norm: str, candidate_indices: np.ndarray) -> np.ndarray:
+    if (
+        not query_norm
+        or candidate_indices.size == 0
+        or _title_norms is None
+        or _title_token_sizes is None
+    ):
+        return np.zeros(candidate_indices.size, dtype=np.float32)
 
-    q_tokens = set(query_norm.split())
-    t_tokens = set(title_norm.split())
-    if not q_tokens or not t_tokens:
-        return 0.0
-    overlap = len(q_tokens & t_tokens)
-    if overlap == 0:
-        return 0.0
-    return overlap / len(q_tokens | t_tokens)
+    candidate_titles = _title_norms[candidate_indices]
+    scores = np.zeros(candidate_indices.size, dtype=np.float32)
+    nonempty_title_mask = candidate_titles != ""
+
+    exact_mask = candidate_titles == query_norm
+    scores[exact_mask] = 1.0
+
+    prefix_mask = (~exact_mask) & nonempty_title_mask
+    if prefix_mask.any():
+        prefix_scores = np.fromiter(
+            (
+                0.82 if (title.startswith(query_norm) or query_norm.startswith(title)) else 0.0
+                for title in candidate_titles[prefix_mask]
+            ),
+            dtype=np.float32,
+            count=int(prefix_mask.sum()),
+        )
+        scores[prefix_mask] = np.maximum(scores[prefix_mask], prefix_scores)
+
+    contains_mask = (scores < 0.68) & nonempty_title_mask
+    if contains_mask.any():
+        contains_scores = np.fromiter(
+            (
+                0.68 if (query_norm in title or title in query_norm) else 0.0
+                for title in candidate_titles[contains_mask]
+            ),
+            dtype=np.float32,
+            count=int(contains_mask.sum()),
+        )
+        scores[contains_mask] = np.maximum(scores[contains_mask], contains_scores)
+
+    q_tokens = frozenset(query_norm.split())
+    jaccard_mask = scores < 0.5
+    if q_tokens and jaccard_mask.any():
+        overlap = np.fromiter(
+            (len(q_tokens & _title_token_sets[idx]) for idx in candidate_indices[jaccard_mask]),
+            dtype=np.float32,
+            count=int(jaccard_mask.sum()),
+        )
+        union = (
+            np.float32(len(q_tokens))
+            + _title_token_sizes[candidate_indices[jaccard_mask]].astype(np.float32)
+            - overlap
+        )
+        jaccard_scores = np.divide(
+            overlap,
+            union,
+            out=np.zeros_like(overlap),
+            where=union > 0,
+        )
+        scores[jaccard_mask] = np.maximum(scores[jaccard_mask], jaccard_scores)
+
+    return scores
 
 
 def _find_anchor_indices(query_norm: str, max_matches: int = 5) -> List[int]:
-    if not query_norm or _meta is None or "title_norm" not in _meta.columns:
+    if not query_norm or _title_norms is None:
         return []
 
-    exact_rows = _meta[_meta["title_norm"] == query_norm]
-    if not exact_rows.empty:
-        return [idx for idx in exact_rows.index.tolist()[:max_matches]]
+    exact_indices = _title_norm_to_indices.get(query_norm)
+    if exact_indices is not None and exact_indices.size:
+        return exact_indices[:max_matches].tolist()
 
-    contains_rows = _meta[_meta["title_norm"].str.contains(query_norm, regex=False, na=False)]
-    if not contains_rows.empty:
-        return [idx for idx in contains_rows.index.tolist()[:max_matches]]
+    contains_indices = np.flatnonzero(np.char.find(_title_norms, query_norm) >= 0)
+    if contains_indices.size:
+        return contains_indices[:max_matches].tolist()
 
-    q_tokens = set(query_norm.split())
+    q_tokens = query_norm.split()
     if not q_tokens:
         return []
 
-    scored = []
-    for idx, title_norm in _meta["title_norm"].items():
-        score = _title_match_score(query_norm, title_norm)
-        if score >= 0.5:
-            scored.append((score, idx))
-    scored.sort(reverse=True)
-    return [idx for _, idx in scored[:max_matches]]
+    candidate_indices = _candidate_indices_for_tokens(q_tokens)
+    if candidate_indices.size == 0:
+        return []
+
+    scores = _title_match_scores(query_norm, candidate_indices)
+    valid_mask = scores >= 0.5
+    if not valid_mask.any():
+        return []
+
+    candidate_indices = candidate_indices[valid_mask]
+    scores = scores[valid_mask]
+    order = np.lexsort((-candidate_indices, -scores))
+    return candidate_indices[order][:max_matches].tolist()
 
 
 def _search_with_query_vectors(query_vectors: List[np.ndarray], weights: List[float], candidate_pool: int):
-    combined = {}
+    if _index is None:
+        return (
+            np.empty(0, dtype=np.int32),
+            np.empty(0, dtype=np.float32),
+        )
+
+    combined = np.zeros(int(_index.ntotal), dtype=np.float32)
+    touched: List[np.ndarray] = []
     for vec, weight in zip(query_vectors, weights):
         D, I = _index.search(vec, candidate_pool)
-        for idx, score in zip(I[0], D[0]):
-            if idx < 0:
-                continue
-            combined[idx] = combined.get(idx, 0.0) + float(weight) * float(score)
-    return combined
+        valid_mask = I[0] >= 0
+        if not valid_mask.any():
+            continue
+        indices = I[0][valid_mask].astype(np.int32, copy=False)
+        weighted_scores = D[0][valid_mask].astype(np.float32, copy=False) * np.float32(weight)
+        np.add.at(combined, indices, weighted_scores)
+        touched.append(indices)
+
+    if not touched:
+        return (
+            np.empty(0, dtype=np.int32),
+            np.empty(0, dtype=np.float32),
+        )
+
+    candidate_indices = np.unique(np.concatenate(touched))
+    return candidate_indices, combined[candidate_indices]
 
 
 def _dedupe_items_by_title(items):
@@ -311,23 +422,24 @@ def build_features_for_candidates(candidates):
     candidates: list of dicts with at least `score` (semantic similarity).
     Returns a NumPy array shape [N, len(FEATURE_COLUMNS)].
     """
-    X = []
-    for it in candidates:
-        feats = []
-        for col in FEATURE_COLUMNS:
-            raw = it.get(col)
-            if raw is None and col == "semantic_score":
-                raw = it.get("score")
-            try:
-                feats.append(float(raw or 0.0))
-            except Exception:
-                feats.append(0.0)
-        X.append(feats)
-
-    if not X:
+    if not candidates:
         return np.zeros((0, len(FEATURE_COLUMNS)), dtype=np.float32)
 
-    return np.array(X, dtype=np.float32)
+    cols = []
+    for col in FEATURE_COLUMNS:
+        values = np.fromiter(
+            (
+                _safe_float(
+                    it.get("score") if col == "semantic_score" and it.get(col) is None else it.get(col)
+                )
+                for it in candidates
+            ),
+            dtype=np.float32,
+            count=len(candidates),
+        )
+        cols.append(values)
+
+    return np.column_stack(cols).astype(np.float32, copy=False)
 
 
 def rerank_with_xgb(candidates):
@@ -396,6 +508,7 @@ def _load_index_if_exists() -> bool:
             _embeddings = None
             _title_ids = None
             _meta = None
+            _refresh_lookup_state()
     return False
 
 
@@ -445,10 +558,12 @@ def reset_artifacts():
                 os.remove(p)
         except Exception as e:
             raise HTTPException(500, f"Failed to remove {p}: {e}")
-    global _index, _title_ids, _meta
+    global _index, _title_ids, _meta, _embeddings
     _index = None
     _title_ids = None
     _meta = None
+    _embeddings = None
+    _refresh_lookup_state()
     return {"ok": True}
 
 
@@ -600,18 +715,27 @@ def recs_semantic(req: SemanticReq):
     candidate_pool = min(candidate_pool, int(_index.ntotal))
 
     # 2) Run one or more semantic searches and fuse their scores.
-    combined_scores = _search_with_query_vectors(query_vectors, weights, candidate_pool)
-    ranked_indices = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)
+    ranked_indices, semantic_scores = _search_with_query_vectors(
+        query_vectors, weights, candidate_pool
+    )
+    if ranked_indices.size == 0:
+        return []
+
+    order = np.lexsort((-ranked_indices, -semantic_scores))
+    ranked_indices = ranked_indices[order]
+    semantic_scores = semantic_scores[order]
+    title_bonuses = _title_match_scores(query_norm, ranked_indices)
 
     # 3) Collect candidates as dicts, blending in a title-match bonus.
     items = []
-    for idx, semantic_score in ranked_indices:
+    for idx, semantic_score, title_bonus in zip(ranked_indices, semantic_scores, title_bonuses):
         title_id = int(_title_ids[idx])
-        row = _row_for_title_id(title_id)
-        title = str(row["name"]) if row is not None else f"Title {title_id}"
-        title_norm = _normalize_title(title)
-        title_bonus = _title_match_score(query_norm, title_norm)
-        final_score = float(semantic_score) + (0.45 * title_bonus)
+        title = (
+            str(_title_names[idx])
+            if _title_names is not None and idx < len(_title_names)
+            else f"Title {title_id}"
+        )
+        final_score = float(semantic_score) + (0.45 * float(title_bonus))
         items.append(
             {
                 "title_id": title_id,

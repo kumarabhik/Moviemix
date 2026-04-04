@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
         - name: backend
-          image: moviemix-backend:latest
+          image: ghcr.io/i4mgro0t/moviemix-backend:latest
           imagePullPolicy: IfNotPresent
           env:
             - name: RECS_URL

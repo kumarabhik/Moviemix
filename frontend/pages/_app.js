@@ -4,9 +4,12 @@ import "../styles/globals.css";
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 
-import { getEmailFromToken, getToken, isLoggedIn, logout } from "../lib/session";
+import { apiUrl } from "../lib/api";
+import { getEmailFromToken, getNameFromToken, getToken, isLoggedIn, logout } from "../lib/session";
 
-function toDisplayName(email = "") {
+function toDisplayName(name = "", email = "") {
+  const preferred = String(name || "").trim();
+  if (preferred) return preferred;
   const raw = String(email || "").split("@")[0].trim();
   if (!raw) return "Profile";
   return raw.charAt(0).toUpperCase() + raw.slice(1);
@@ -15,6 +18,7 @@ function toDisplayName(email = "") {
 function Header({ dark, setDark }) {
   const [logged, setLogged] = useState(false);
   const [email, setEmail] = useState("");
+  const [name, setName] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const profileButtonRef = useRef(null);
   const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
@@ -24,6 +28,7 @@ function Header({ dark, setDark }) {
       const loggedIn = isLoggedIn();
       setLogged(loggedIn);
       setEmail(loggedIn ? getEmailFromToken() : "");
+      setName(loggedIn ? getNameFromToken() : "");
     };
     refresh();
     window.addEventListener("storage", refresh);
@@ -60,7 +65,7 @@ function Header({ dark, setDark }) {
     };
   }, [menuOpen]);
 
-  const profileName = toDisplayName(email);
+  const profileName = toDisplayName(name, email);
   const profileInitial = profileName.charAt(0).toUpperCase();
 
   return (
@@ -188,7 +193,7 @@ export default function MyApp({ Component, pageProps }) {
     if (!token) return;
     sessionStorage.setItem("mm_session_started", "1");
 
-    fetch("/api/interactions", {
+    fetch(apiUrl("/api/interactions"), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

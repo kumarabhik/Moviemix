@@ -1,4 +1,19 @@
 import { useState } from "react";
+import { apiUrl } from "../lib/api";
+import { setToken } from "../lib/session";
+
+const GOOGLE_AUTH_ENABLED = String(process.env.NEXT_PUBLIC_ENABLE_GOOGLE_AUTH || "0") === "1";
+
+function humanizeAuthError(code = "") {
+  switch (String(code || "").trim()) {
+    case "account_exists_use_google_login":
+      return "This email already exists as a Google account. Please continue with Google.";
+    case "email_in_use":
+      return "An account with this email already exists.";
+    default:
+      return String(code || "signup_failed").replaceAll("_", " ");
+  }
+}
 
 export default function SignupPage() {
   const [email, setEmail] = useState("");
@@ -9,18 +24,22 @@ export default function SignupPage() {
     e.preventDefault();
     setErr("");
     try {
-      const r = await fetch("/api/auth/signup", {
+      const r = await fetch(apiUrl("/api/auth/signup"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
       });
       const j = await r.json();
-      if (!r.ok) throw new Error(j?.error || "signup_failed");
-      localStorage.setItem("moviemix_token", j.token);
+      if (!r.ok) throw new Error(humanizeAuthError(j?.error || "signup_failed"));
+      setToken(j.token);
       window.location.href = "/";
     } catch (e) {
       setErr(String(e.message || e));
     }
+  };
+
+  const startGoogleSignup = () => {
+    window.location.href = apiUrl("/api/auth/google/start?returnTo=/");
   };
 
   return (
@@ -54,6 +73,22 @@ export default function SignupPage() {
                   <div className="alert alert-danger py-2 mb-3">
                     {err}
                   </div>
+                )}
+
+                {GOOGLE_AUTH_ENABLED && (
+                  <>
+                    <button
+                      type="button"
+                      className="btn btn-outline-secondary w-100 mb-3 d-flex align-items-center justify-content-center gap-2"
+                      onClick={startGoogleSignup}
+                    >
+                      <span aria-hidden="true">G</span>
+                      <span>Continue with Google</span>
+                    </button>
+                    <div className="text-center text-muted small mb-3">
+                      or create an account with email
+                    </div>
+                  </>
                 )}
 
                 <form

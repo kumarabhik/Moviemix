@@ -6,6 +6,16 @@ function nocacheParams() {
   return `_ts=${Date.now()}`;
 }
 
+function trimTrailingSlash(value = "") {
+  return String(value || "").replace(/\/+$/, "");
+}
+
+export function apiUrl(path = "") {
+  const normalizedPath = String(path || "").startsWith("/") ? String(path) : `/${path}`;
+  const base = trimTrailingSlash(process.env.NEXT_PUBLIC_API_BASE || "");
+  return base ? `${base}${normalizedPath}` : normalizedPath;
+}
+
 export function toArray(res) {
   if (!res) return [];
   if (Array.isArray(res)) return res;
@@ -30,7 +40,7 @@ async function parseJson(res) {
 }
 
 export async function importFromTrakt() {
-  const r = await fetch("/api/integrations/trakt/import", {
+  const r = await fetch(apiUrl("/api/integrations/trakt/import"), {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
     cache: "no-store",
@@ -45,7 +55,7 @@ export async function getSimilarBySeedText(seedText, topK = 5) {
     seed_text: seedText,
     topK: String(topK),
   });
-  const res = await fetch(`/api/recs/content?${params.toString()}`, {
+  const res = await fetch(apiUrl(`/api/recs/content?${params.toString()}`), {
     cache: "no-store",
   });
   if (!res.ok) throw new Error("similar fetch failed");
@@ -53,9 +63,9 @@ export async function getSimilarBySeedText(seedText, topK = 5) {
 }
 
 export async function getSemantic(query, topK = 5) {
-  const url = `/api/recs/semantic?query=${encodeURIComponent(
+  const url = apiUrl(`/api/recs/semantic?query=${encodeURIComponent(
     query
-  )}&topK=${topK}&${nocacheParams()}`;
+  )}&topK=${topK}&${nocacheParams()}`);
   const r = await fetch(url, {
     cache: "no-store",
     headers: { "Cache-Control": "no-store" },
@@ -64,7 +74,7 @@ export async function getSemantic(query, topK = 5) {
 }
 
 export async function getTitles() {
-  const url = `/api/titles?${nocacheParams()}`;
+  const url = apiUrl(`/api/titles?${nocacheParams()}`);
   const r = await fetch(url, {
     cache: "no-store",
     headers: { "Cache-Control": "no-store" },
@@ -73,7 +83,7 @@ export async function getTitles() {
 }
 
 export async function getTopPicks(topK = 12) {
-  const url = `/api/recs/cf?topK=${topK}&${nocacheParams()}`;
+  const url = apiUrl(`/api/recs/cf?topK=${topK}&${nocacheParams()}`);
   const r = await fetch(url, {
     cache: "no-store",
     headers: { "Cache-Control": "no-store" },
@@ -83,7 +93,7 @@ export async function getTopPicks(topK = 12) {
 
 // ---- Wishlist (requires auth) ----
 export async function addToWishlist(titleId) {
-  const res = await fetch(`/api/wishlist/${titleId}`, {
+  const res = await fetch(apiUrl(`/api/wishlist/${titleId}`), {
     method: "POST",
     headers: { ...authHeaders() },
   });
@@ -91,7 +101,7 @@ export async function addToWishlist(titleId) {
 }
 
 export async function removeFromWishlist(titleId) {
-  const res = await fetch(`/api/wishlist/${titleId}`, {
+  const res = await fetch(apiUrl(`/api/wishlist/${titleId}`), {
     method: "DELETE",
     headers: { ...authHeaders() },
   });
@@ -99,7 +109,7 @@ export async function removeFromWishlist(titleId) {
 }
 
 export async function getWishlist() {
-  const res = await fetch(`/api/wishlist`, {
+  const res = await fetch(apiUrl("/api/wishlist"), {
     method: "GET",
     headers: { ...authHeaders() },
     cache: "no-store",
@@ -109,13 +119,12 @@ export async function getWishlist() {
 
 // ---- Titles ----
 export async function getTitleById(id) {
-  const res = await fetch(`/api/title/${id}`, { cache: "no-store" });
+  const res = await fetch(apiUrl(`/api/title/${id}`), { cache: "no-store" });
   return parseJson(res);
 }
 
 export async function getWatchLinks(id) {
-  const base = process.env.NEXT_PUBLIC_API_BASE || "";
-  const url = `${base}/api/title/${id}/watch-links?_ts=${Date.now()}`;
+  const url = apiUrl(`/api/title/${id}/watch-links?_ts=${Date.now()}`);
 
   try {
     const r = await fetch(url, { cache: "no-store" });
@@ -131,7 +140,7 @@ export async function getAbSummary(days = 14, scope = "all") {
     days: String(days),
     scope,
   });
-  const res = await fetch(`/api/events/ab_summary?${params.toString()}`, {
+  const res = await fetch(apiUrl(`/api/events/ab_summary?${params.toString()}`), {
     method: "GET",
     headers: { ...authHeaders() },
     cache: "no-store",
@@ -140,14 +149,14 @@ export async function getAbSummary(days = 14, scope = "all") {
 }
 
 export async function getReviewsByTitle(titleId) {
-  const r = await fetch(`/api/reviews/title/${titleId}?${nocacheParams()}`, {
+  const r = await fetch(apiUrl(`/api/reviews/title/${titleId}?${nocacheParams()}`), {
     cache: "no-store",
   });
   return parseJson(r);
 }
 
 export async function upsertReview(titleId, payload) {
-  const r = await fetch(`/api/reviews/title/${titleId}`, {
+  const r = await fetch(apiUrl(`/api/reviews/title/${titleId}`), {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(payload || {}),
@@ -156,7 +165,7 @@ export async function upsertReview(titleId, payload) {
 }
 
 export async function getMyReviews() {
-  const r = await fetch("/api/reviews/me", {
+  const r = await fetch(apiUrl("/api/reviews/me"), {
     method: "GET",
     headers: { ...authHeaders() },
     cache: "no-store",
@@ -165,7 +174,7 @@ export async function getMyReviews() {
 }
 
 export async function getMyProfile() {
-  const r = await fetch("/api/profile/me", {
+  const r = await fetch(apiUrl("/api/profile/me"), {
     method: "GET",
     headers: { ...authHeaders() },
     cache: "no-store",

@@ -1,6 +1,7 @@
 param(
   [string]$Namespace = "moviemix",
   [string]$K8sDir = ".\infra\k8s",
+  [string]$EnvFile = ".\.env",
   [string]$JwtSecretValue = ""
 )
 
@@ -23,11 +24,80 @@ function Apply-Manifest {
   kubectl apply -f $Path | Out-Host
 }
 
+function Get-EnvValue {
+  param(
+    [string]$Path,
+    [string]$Key
+  )
+
+  if (!(Test-Path $Path)) {
+    return ""
+  }
+
+  foreach ($line in Get-Content $Path) {
+    $trimmed = $line.Trim()
+    if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith("#")) {
+      continue
+    }
+
+    $parts = $trimmed -split '=', 2
+    if ($parts.Count -ne 2) {
+      continue
+    }
+
+    if ($parts[0].Trim() -ne $Key) {
+      continue
+    }
+
+    $value = $parts[1].Trim()
+    if (
+      ($value.StartsWith('"') -and $value.EndsWith('"')) -or
+      ($value.StartsWith("'") -and $value.EndsWith("'"))
+    ) {
+      return $value.Substring(1, $value.Length - 2)
+    }
+
+    return $value
+  }
+
+  return ""
+}
+
+function Ensure-AppSecrets {
+  param(
+    [string]$Ns,
+    [string]$EnvPath
+  )
+
+  if (Test-Path $EnvPath) {
+    $resolvedEnvPath = (Resolve-Path $EnvPath).Path
+    Write-Host "Ensuring secret: moviemix-secrets from env file: $resolvedEnvPath"
+    kubectl -n $Ns create secret generic moviemix-secrets --from-env-file=$resolvedEnvPath --dry-run=client -o yaml | kubectl apply -f - | Out-Host
+    return
+  }
+
+  kubectl -n $Ns get secret moviemix-secrets 1>$null 2>$null
+  if ($LASTEXITCODE -eq 0) {
+    Write-Host "Env file not found, reusing existing moviemix-secrets in namespace: $Ns"
+    return
+  }
+
+  throw "Env file not found ($EnvPath) and secret moviemix-secrets does not exist in namespace $Ns."
+}
+
 function Ensure-BackendSecrets {
   param(
     [string]$Ns,
-    [string]$JwtVal
+    [string]$JwtVal,
+    [string]$EnvPath
   )
+
+  if ([string]::IsNullOrWhiteSpace($JwtVal)) {
+    $JwtVal = Get-EnvValue -Path $EnvPath -Key "JWT_SECRET"
+    if (![string]::IsNullOrWhiteSpace($JwtVal)) {
+      Write-Host "Using JWT_SECRET from env file for backend-secrets."
+    }
+  }
 
   if ([string]::IsNullOrWhiteSpace($JwtVal)) {
     $existingSecretB64 = kubectl -n $Ns get secret backend-secrets -o jsonpath='{.data.jwt_secret}' 2>$null
@@ -85,8 +155,10 @@ if (!(Test-Path $K8sDir)) {
 # ---- Apply in dependency order ----
 Apply-Manifest (Join-Path $K8sDir "namespace.yaml")
 
+Ensure-AppSecrets -Ns $Namespace -EnvPath $EnvFile
+
 # Ensure backend JWT secret exists BEFORE backend deploy starts
-Ensure-BackendSecrets -Ns $Namespace -JwtVal $JwtSecretValue
+Ensure-BackendSecrets -Ns $Namespace -JwtVal $JwtSecretValue -EnvPath $EnvFile
 
 # DB first so backend can connect
 Apply-Manifest (Join-Path $K8sDir "db.yaml")

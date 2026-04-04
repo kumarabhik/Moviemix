@@ -11,7 +11,7 @@ import {
   StarIcon as StarSolid,
 } from "@heroicons/react/24/solid";
 
-import { addToWishlist, removeFromWishlist } from "../lib/api";
+import { addToWishlist, apiUrl, removeFromWishlist } from "../lib/api";
 import { getToken, isLoggedIn } from "../lib/session";
 
 export default function MovieCard({
@@ -58,7 +58,7 @@ export default function MovieCard({
 
   function logEvent(event, titleId, meta) {
     const token = getToken?.() || "";
-    fetch("/api/interactions", {
+    fetch(apiUrl("/api/interactions"), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -133,7 +133,7 @@ export default function MovieCard({
   useEffect(() => {
     if (!id || !isLoggedIn()) return;
     const token = getToken?.() || "";
-    fetch(`/api/interactions/me?ids=${encodeURIComponent(String(id))}`, {
+    fetch(apiUrl(`/api/interactions/me?ids=${encodeURIComponent(String(id))}`), {
       headers: {
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },

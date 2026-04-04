@@ -3,9 +3,50 @@
 const KEY_PRIMARY = "moviemix_token";
 const KEY_FALLBACK = "token";
 
+function clearStoredTokens() {
+  if (typeof window === "undefined") return;
+  localStorage.removeItem(KEY_PRIMARY);
+  localStorage.removeItem(KEY_FALLBACK);
+}
+
+function decodeTokenPayload(token = "") {
+  try {
+    const t = token || (typeof window !== "undefined"
+      ? localStorage.getItem(KEY_PRIMARY) || localStorage.getItem(KEY_FALLBACK) || ""
+      : "");
+    if (!t) return null;
+
+    const parts = String(t).split(".");
+    if (parts.length < 2) return null;
+
+    let b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    while (b64.length % 4 !== 0) b64 += "=";
+
+    return JSON.parse(atob(b64));
+  } catch {
+    return null;
+  }
+}
+
+function isExpiredPayload(payload) {
+  const exp = Number(payload?.exp || 0);
+  if (!Number.isFinite(exp) || exp <= 0) return false;
+  const now = Math.floor(Date.now() / 1000);
+  return exp <= now;
+}
+
 export function getToken() {
   if (typeof window === "undefined") return "";
-  return localStorage.getItem(KEY_PRIMARY) || localStorage.getItem(KEY_FALLBACK) || "";
+  const token = localStorage.getItem(KEY_PRIMARY) || localStorage.getItem(KEY_FALLBACK) || "";
+  if (!token) return "";
+
+  const payload = decodeTokenPayload(token);
+  if (payload && isExpiredPayload(payload)) {
+    clearStoredTokens();
+    return "";
+  }
+
+  return token;
 }
 
 export function setToken(token) {
@@ -27,26 +68,7 @@ export function isLoggedIn() {
 }
 
 export function logout() {
-  if (typeof window === "undefined") return;
-  localStorage.removeItem(KEY_PRIMARY);
-  localStorage.removeItem(KEY_FALLBACK);
-}
-
-function decodeTokenPayload(token = "") {
-  try {
-    const t = token || getToken();
-    if (!t) return null;
-
-    const parts = String(t).split(".");
-    if (parts.length < 2) return null;
-
-    let b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-    while (b64.length % 4 !== 0) b64 += "=";
-
-    return JSON.parse(atob(b64));
-  } catch {
-    return null;
-  }
+  clearStoredTokens();
 }
 
 export function getUserIdFromToken(token = "") {
@@ -67,6 +89,12 @@ export function getEmailFromToken(token = "") {
   const json = decodeTokenPayload(token);
   if (!json) return "";
   return String(json?.email || "");
+}
+
+export function getNameFromToken(token = "") {
+  const json = decodeTokenPayload(token);
+  if (!json) return "";
+  return String(json?.name || json?.display_name || "");
 }
 
 
