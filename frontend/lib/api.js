@@ -62,6 +62,15 @@ export async function getSimilarBySeedText(seedText, topK = 5) {
   return res.json();
 }
 
+export async function getSuggestions(query, limit = 8) {
+  if (!query || query.trim().length < 2) return { ok: true, items: [] };
+  const url = apiUrl(
+    `/api/titles/suggest?q=${encodeURIComponent(query.trim())}&limit=${limit}&${nocacheParams()}`
+  );
+  const r = await fetch(url, { cache: "no-store" });
+  return parseJson(r);
+}
+
 export async function getSemantic(query, topK = 5) {
   const url = apiUrl(`/api/recs/semantic?query=${encodeURIComponent(
     query

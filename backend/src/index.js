@@ -145,6 +145,27 @@ app.get("/api/titles", async (_req, res) => {
   }
 });
 
+
+app.get("/api/titles/suggest", async (req, res) => {
+  const raw = String(req.query.q || "").trim();
+  const limit = Math.min(Math.max(1, parseInt(req.query.limit || "8", 10)), 20);
+  if (raw.length < 1) return res.json({ ok: true, items: [] });
+  const escaped = raw.replace(/[%_\\]/g, (c) => `\\${c}`);
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, name AS title, year, poster_url
+       FROM titles
+       WHERE name ILIKE $1 ESCAPE '\\'
+       ORDER BY popularity DESC NULLS LAST, year DESC NULLS LAST
+       LIMIT $2`,
+      [`%${escaped}%`, limit]
+    );
+    res.json({ ok: true, items: rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.use((err, _req, res, _next) => {
   console.error("Global Error Handler:", err.stack || err);
   res.status(500).json({ ok: false, error: err.message || "Internal Server Error" });

@@ -245,6 +245,27 @@ $env:AUTH_TOKEN="<bearer-token>"
 python scripts/eval_offline.py
 ```
 
+## Recommender Latency Benchmark
+
+Use the benchmark helper to compare the current recommender ranking path against the `HEAD` version without overwriting your local work.
+
+Latest measured benchmark output is summarized in [`RESULTS.md`](RESULTS.md).
+
+```powershell
+python scripts/benchmark_recommender.py
+python scripts/benchmark_recommender.py --query "The Dark Knight" --iterations 300
+```
+
+What it measures:
+
+- semantic ranking stage inside `recommender/main.py`
+- `avg`, `p50`, and `p95` latency
+- percentage decrease versus `HEAD`
+
+Important note:
+
+- this benchmark replays stored embedding vectors, so it isolates the ranking/search stage and does not include `SentenceTransformer.encode(...)` time
+
 Optional evaluation envs:
 
 ```powershell
@@ -318,14 +339,110 @@ Ports:
 - Alertmanager: `9093`
 - Grafana: `3001`
 
+## Free Deploy
+
+If you want a no-server-cost demo deployment, use:
+
+- frontend: Vercel
+- backend: Hugging Face Docker Space
+- recommender: Hugging Face Docker Space
+- database: Supabase Free
+
+The repo has been adjusted for that flow:
+
+- the frontend supports `NEXT_PUBLIC_API_BASE` for all browser requests
+- the backend supports SSL-managed Postgres via `DATABASE_REQUIRE_SSL=1`
+
+See:
+
+- [`FREE_DEPLOY.md`](c:/Users/kumar/Downloads/XOXO/moviemix/FREE_DEPLOY.md)
+
+## Production Deploy (Recommended First Real Site)
+
+The fastest reliable production path for this repo is:
+
+1. Ubuntu VM / Droplet
+2. Docker Compose
+3. Caddy for HTTPS + domain
+
+This repo now includes `infra/docker-compose.prod.yaml` and `infra/Caddyfile` for that setup.
+
+### What to provision
+
+- 1 Ubuntu server with at least `4 vCPU / 8 GB RAM` recommended for this stack
+- 1 domain or subdomain, such as `app.example.com`
+
+The size recommendation is an inference from the current service mix and resource limits in the repo: Postgres, Next.js, Express, a Python recommender using SentenceTransformers / FAISS / XGBoost, and optional Airflow.
+
+### What to set in `.env`
+
+Use your normal app envs, and also set:
+
+```dotenv
+APP_DOMAIN=app.example.com
+ACME_EMAIL=you@example.com
+DATABASE_URL=postgresql://admin:change_me@db:5432/moviemix
+JWT_SECRET=use_a_long_random_secret
+```
+
+`DATABASE_URL` should keep `@db:5432` because the containers talk to Postgres over the internal Docker network.
+
+Keep `TRAKT_REDIRECT_URI` consistent with the URI already registered in your Trakt app.
+
+### Deploy commands
+
+On the server, from repo root:
+
+```powershell
+docker compose --env-file .env -f .\infra\docker-compose.prod.yaml up -d --build
+```
+
+### What gets exposed publicly
+
+- `https://<APP_DOMAIN>` -> frontend
+- backend stays private behind the frontend rewrites
+- recommender stays private
+- Airflow stays private
+
+### Basic verification
+
+```powershell
+docker compose -f .\infra\docker-compose.prod.yaml ps
+docker compose -f .\infra\docker-compose.prod.yaml logs -f --tail=100 caddy
+docker compose -f .\infra\docker-compose.prod.yaml logs -f --tail=100 frontend
+docker compose -f .\infra\docker-compose.prod.yaml logs -f --tail=100 backend
+```
+
+Then visit:
+
+- `https://<APP_DOMAIN>`
+
+If you need the semantic index rebuilt after first deploy:
+
+```powershell
+docker compose -f .\infra\docker-compose.prod.yaml exec backend node -e "fetch('http://recommender:8001/admin/build_embeddings',{method:'POST',headers:{'content-type':'application/json'},body:'{}'}).then(r=>r.text()).then(console.log).catch(console.error)"
+```
+
 ## Kubernetes (Optional)
 
 ```powershell
+minikube image build -t moviemix-backend:latest .\backend
+minikube image build -t moviemix-recommender:latest .\recommender
+minikube image build -t moviemix-frontend:latest .\frontend
 .\k8s-up.ps1
 .\k8s-status.ps1
 .\k8s-down.ps1
 .\k8s-resume.ps1
 ```
+
+Notes:
+
+- `k8s-up.ps1` expects a repo-root `.env` file and creates/updates the `moviemix-secrets` secret from it.
+- The script also creates `backend-secrets` for `JWT_SECRET`, reusing `.env` when present.
+- The Postgres manifest now bootstraps the schema on first start, matching the Docker Compose flow.
+- The recommender PVC is seeded from the image on first run so bundled FAISS / XGBoost artifacts are not lost.
+- Open the app with `minikube service frontend -n moviemix --url`.
+- If you are not using Minikube, push the three images to your registry and update the image names in `infra/k8s/*.yaml`.
 
 Manifests are under `infra/k8s/`.
 
